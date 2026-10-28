@@ -2,16 +2,15 @@ services:
   - type: web
     name: binary-org-system
     runtime: node
-    # Cheapest paid plan that supports persistent disks: "starter"
-    # (the free plan does not support disks, so data would be lost on restart/redeploy)
-    plan: starter
+    # Free plan: no persistent disk (the free plan does not support disks).
+    # Durable data lives in Neon Postgres, reached via DATABASE_URL below;
+    # server.js stores the whole app state in Neon when DATABASE_URL is set.
+    plan: free
     buildCommand: npm install
     startCommand: node server.js
-    disk:
-      name: binary-org-data
-      mountPath: /data
-      sizeGB: 1
     envVars:
-      - key: DATA_DIR
-        value: /data
+      # Paste the Neon connection string when creating the service (sync: false
+      # means Render prompts for it at deploy time and does not store it in git).
+      - key: DATABASE_URL
+        sync: false
       # PORT is provided by Render automatically — do not set it here.

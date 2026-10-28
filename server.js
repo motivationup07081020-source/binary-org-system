@@ -2,7 +2,9 @@
 /**
  * 会員一括管理システム（外部公開用の単体版）
  * - Node.js 標準ライブラリのみ（外部依存なし）
- * - データは JSON ファイルに原子書き込み（tmp -> rename）で保存
+ * - データの保存先は環境変数で切り替える:
+ *   - DATABASE_URL があれば Neon Postgres（HTTP SQL API）に状態一式を保存（無料枠運用向け）
+ *   - なければ従来どおり JSON ファイルに原子書き込み（tmp -> rename）で保存
  * - 本部パスワードは crypto.scrypt でハッシュ化
  * - リーダーはトークン付き専用リンク（パスワードなし）
  */
@@ -18,6 +20,13 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'data.json');
 const ROOT_ID = 'COMPANY';
 
+// ---------- 保存先の切り替え ----------
+// DATABASE_URL が設定されていれば Neon Postgres に保存し、未設定ならローカルファイルに保存する。
+const DATABASE_URL = process.env.DATABASE_URL || '';
+const DB_MODE = DATABASE_URL.length > 0;
+// テスト・検証用に Neon HTTP エンドポイントを上書きできる（通常は DATABASE_URL のホストから導出する）
+const NEON_HTTP_ENDPOINT = process.env.NEON_HTTP_ENDPOINT || '';
+
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 // ---------- データストア ----------
@@ -32,6 +41,12 @@ function defaultStore() {
   };
 }
 let store;
+function writeStoreToFile(snapshot) {
+  const tmp = DATA_FILE + '.tmp';
+  fs.writeFileSync(tmp, snapshot, 'utf8');
+  if (fs.existsSync(DATA_FILE)) { try { fs.copyFileSync(DATA_FILE, DATA_FILE + '.bak'); } catch (_) {} }
+  fs.renameSync(tmp, DATA_FILE);
+}
 function loadStore() {
   if (fs.existsSync(DATA_FILE)) {
     try { store = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); return; }
@@ -42,14 +57,89 @@ function loadStore() {
 }
 let saveQueue = Promise.resolve();
 function saveStore() {
+  if (DB_MODE) return saveStoreToDb();
   const snapshot = JSON.stringify(store, null, 2);
-  saveQueue = saveQueue.then(() => {
-    const tmp = DATA_FILE + '.tmp';
-    fs.writeFileSync(tmp, snapshot, 'utf8');
-    if (fs.existsSync(DATA_FILE)) { try { fs.copyFileSync(DATA_FILE, DATA_FILE + '.bak'); } catch (_) {} }
-    fs.renameSync(tmp, DATA_FILE);
-  });
+  saveQueue = saveQueue.then(() => writeStoreToFile(snapshot));
   return saveQueue;
+}
+
+// ---------- Neon Postgres バックエンド ----------
+// 状態一式を app_state テーブルの1行（k='state', v=状態JSON）に保存する。
+// 通信は Neon の HTTP SQL API: POST https://<DATABASE_URLのホスト>/sql
+//   ヘッダー: Neon-Connection-String: <DATABASE_URL>
+//   ボディ:   {"query": "...", "params": [...]}
+//   レスポンス: {"rows": [...], "fields": [...], "command": "...", "rowCount": n}
+const STATE_KEY = 'state';
+const SQL_CREATE_TABLE = 'CREATE TABLE IF NOT EXISTS app_state (k text PRIMARY KEY, v jsonb)';
+const SQL_SELECT_STATE = 'SELECT v FROM app_state WHERE k = $1';
+const SQL_UPSERT_STATE = 'INSERT INTO app_state (k, v) VALUES ($1, $2) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v';
+
+function neonEndpoint() {
+  if (NEON_HTTP_ENDPOINT) return NEON_HTTP_ENDPOINT;
+  const u = new URL(DATABASE_URL); // 形式が不正ならここで例外 → 起動失敗として表面化させる
+  return `https://${u.host}/sql`;
+}
+async function dbQuery(query, params) {
+  let res;
+  try {
+    res = await fetch(neonEndpoint(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Neon-Connection-String': DATABASE_URL },
+      body: JSON.stringify({ query, params: params || [] }),
+      signal: AbortSignal.timeout ? AbortSignal.timeout(30000) : undefined
+    });
+  } catch (e) {
+    throw new Error('データベース（Neon）に接続できませんでした: ' + e.message);
+  }
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch (_) { /* エラー処理側で text を使う */ }
+  if (!res.ok) {
+    const msg = (json && (json.message || json.error)) || text || ('HTTP ' + res.status);
+    throw new Error('データベース（Neon）でエラーが発生しました: ' + msg);
+  }
+  return json || {};
+}
+
+// DBへの保存はプロミスチェーンで直列化し、同時リクエストで書き込みが交錯しないようにする。
+// 失敗した保存は呼び出し側（await saveStore() しているハンドラ）へ例外として伝える。
+// ただしチェーン自体は失敗で止めず、次の保存は改めて試みる。
+let dbSaveQueue = Promise.resolve();
+function saveStoreToDb() {
+  const snapshot = JSON.stringify(store, null, 2);
+  const op = dbSaveQueue.then(async () => {
+    // ローカルファイルにもミラー保存する（best effort。本の保存先はDB。
+    // ファイルが消える環境でも最後の状態の控えにはなるが、起動時は必ずDBから読む）
+    try { writeStoreToFile(snapshot); }
+    catch (e) { console.error('ローカルファイルへのミラー保存に失敗しました（DBへの保存は続行します）:', e.message); }
+    await dbQuery(SQL_UPSERT_STATE, [STATE_KEY, snapshot]);
+  });
+  dbSaveQueue = op.catch(() => {});
+  return op;
+}
+
+// DBモードの起動処理: テーブルを用意し、保存済みの状態を読む。
+// 行が無ければファイル版と同じ初期状態（会社枠のみ）を作って挿入する。
+// DBに繋がらない・データが壊れている場合は、空の状態で起動して上書きするようなことはせず、例外にする。
+async function initDbStore() {
+  await dbQuery(SQL_CREATE_TABLE, []);
+  const r = await dbQuery(SQL_SELECT_STATE, [STATE_KEY]);
+  const row = r && Array.isArray(r.rows) ? r.rows[0] : null;
+  if (row && row.v != null) {
+    const parsed = typeof row.v === 'string' ? JSON.parse(row.v) : row.v;
+    if (!parsed || typeof parsed !== 'object' || !parsed.settings || !parsed.members || !parsed.members[ROOT_ID]) {
+      throw new Error('データベースに保存されているデータの形式が不正です（保護のため上書きしません）');
+    }
+    store = parsed;
+    return;
+  }
+  store = defaultStore();
+  await saveStoreToDb();
+}
+
+async function boot() {
+  if (DB_MODE) await initDbStore();
+  else loadStore();
 }
 
 // ---------- ユーティリティ ----------
@@ -518,11 +608,18 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-loadStore();
 if (require.main === module) {
-  server.listen(PORT, HOST, () => {
-    console.log(`会員一括管理システムを起動しました: http://${HOST}:${PORT} (data: ${DATA_FILE})`);
-    if (!store.settings.hqPassHash) console.log('初回セットアップ: /setup で本部IDとパスワードを設定してください。');
+  boot().then(() => {
+    server.listen(PORT, HOST, () => {
+      console.log(`会員一括管理システムを起動しました: http://${HOST}:${PORT} (data: ${DB_MODE ? 'Neon Postgres (DATABASE_URL)' : DATA_FILE})`);
+      if (!store.settings.hqPassHash) console.log('初回セットアップ: /setup で本部IDとパスワードを設定してください。');
+    });
+  }).catch(e => {
+    // DBに繋がらない等で状態を読めない場合は、空データで起動して本データを壊さないよう終了する
+    console.error('起動に失敗しました:', e.message);
+    process.exit(1);
   });
+} else if (!DB_MODE) {
+  loadStore();
 }
-module.exports = { server, loadStore };
+module.exports = { server, loadStore, boot };
