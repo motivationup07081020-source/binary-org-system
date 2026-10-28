@@ -1,0 +1,4 @@
+data/*.json
+data/*.json.bak
+data/*.tmp
+node_modules/

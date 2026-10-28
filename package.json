@@ -1,0 +1,1 @@
+{"description":"会員一括管理システム（バイナリー組織図）外部公開用の単体版。Node.js標準ライブラリのみ。","engines":{"node":">=18"},"main":"server.js","name":"member-central-management","private":true,"scripts":{"start":"node server.js","test":"node tests/run-tests.js"},"version":"1.0.0"}

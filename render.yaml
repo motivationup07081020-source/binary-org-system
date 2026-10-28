@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: binary-org-system
+    runtime: node
+    # Cheapest paid plan that supports persistent disks: "starter"
+    # (the free plan does not support disks, so data would be lost on restart/redeploy)
+    plan: starter
+    buildCommand: npm install
+    startCommand: node server.js
+    disk:
+      name: binary-org-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: DATA_DIR
+        value: /data
+      # PORT is provided by Render automatically — do not set it here.
