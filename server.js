@@ -313,6 +313,22 @@ ul.tree{list-style:none;padding-left:18px;border-left:2px solid #bbf7d0;margin:4
 ul.tree li{margin:4px 0}.node{background:#fff;border:1px solid #ccc;border-radius:8px;padding:6px 10px;display:inline-block}
 .root-node{background:#14532d;color:#fff;font-weight:bold}
 .small{font-size:12px;color:#555}.nav a{margin-right:12px}
+.chart-wrap{overflow-x:auto;padding:6px 2px}
+.chart-tree,.chart-tree ul{display:flex;justify-content:center;list-style:none;margin:0;padding:0;position:relative}
+.chart-tree ul{padding-top:22px}
+.chart-tree li{display:flex;flex-direction:column;align-items:center;position:relative;padding:22px 7px 0}
+.chart-tree ul::before{content:'';position:absolute;top:0;left:50%;border-left:2px solid #86c98f;height:22px}
+.chart-tree li::before,.chart-tree li::after{content:'';position:absolute;top:0;right:50%;border-top:2px solid #86c98f;width:50%;height:22px}
+.chart-tree li::after{right:auto;left:50%;border-left:2px solid #86c98f}
+.chart-tree li:only-child::before,.chart-tree li:only-child::after{display:none}
+.chart-tree li:only-child{padding-top:0}
+.chart-tree li:first-child::before,.chart-tree li:last-child::after{border:0 none}
+.chart-tree li:last-child::before{border-right:2px solid #86c98f}
+.chart-node{background:#fff;border:1.5px solid #14532d;border-radius:8px;padding:6px 10px;text-align:center;min-width:118px;line-height:1.45}
+.chart-node.chart-root{background:#14532d;color:#fff;font-weight:bold}
+.chart-slot{display:block;border:1.5px dashed #94a3b8;color:#14532d;background:#f8fafc;border-radius:8px;padding:7px 10px;text-decoration:none;min-width:118px;text-align:center;box-sizing:border-box;font-size:14px}
+.chart-slot:hover{background:#dcfce7;border-color:#14532d}
+.chart-note{margin-top:4px}
 </style></head><body><header><strong>会員一括管理システム</strong></header><main>${flashHtml}${errHtml}${body}</main></body></html>`;
 }
 function flashFrom(url) {
@@ -344,13 +360,36 @@ function memberOptions(selectedId, scopeIds) {
   list.sort((a, b) => a.memberId.localeCompare(b.memberId));
   return list.map(m => `<option value="${esc(m.memberId)}" ${m.memberId === selectedId ? 'selected' : ''}>${esc(m.name)}（${esc(m.memberId)}）</option>`).join('');
 }
-function addMemberForm(action, scopeIds) {
-  return `<form method="post" action="${action}">
+// ---------- 組織図チャート描画（リーダー画面用） ----------
+// 会員を箱で表示し、左右の子を線でつなぐ。空き枠は「＋ 左に追加／＋ 右に追加」の
+// リンクボタンにし、押すと basePath?parentId=<id>&side=<L|R>#add-form へ移動して
+// 入力フォームに親と位置があらかじめ選ばれた状態になる。
+const CHART_MAX_DEPTH = 10;
+function renderChartTree(rootId, basePath, depth = 0) {
+  const m = store.members[rootId];
+  if (!m) return '';
+  const c = countsFor(rootId);
+  const node = m.root
+    ? `<div class="chart-node chart-root">${esc(m.name)}</div>`
+    : `<div class="chart-node"><strong>${esc(m.name)}</strong><br><span class="small">ID:${esc(m.memberId)}<br>登録:${esc(m.regDate || '-')}<br>左${c.left}・右${c.right}</span></div>`;
+  const map = childrenMap();
+  const ch = map.get(rootId) || { L: null, R: null };
+  if (depth >= CHART_MAX_DEPTH) {
+    return (ch.L || ch.R) ? `${node}<div class="small chart-note">（これより下は省略しています）</div>` : node;
+  }
+  const slot = side => `<a class="chart-slot" href="${basePath}?parentId=${encodeURIComponent(rootId)}&side=${side}#add-form">＋ ${side === 'L' ? '左' : '右'}に追加</a>`;
+  const l = ch.L ? renderChartTree(ch.L.memberId, basePath, depth + 1) : slot('L');
+  const r = ch.R ? renderChartTree(ch.R.memberId, basePath, depth + 1) : slot('R');
+  return `${node}<ul><li>${l}</li><li>${r}</li></ul>`;
+}
+function addMemberForm(action, scopeIds, preset) {
+  const pre = preset || {};
+  return `<form method="post" action="${action}" id="add-form">
   <label>名前<input name="name" required maxlength="100"></label>
   <label>会員ID<input name="memberId" required maxlength="64" placeholder="半角英数・-・_"></label>
   <label>登録日<input name="regDate" required type="date"></label>
-  <label>上に付く人（親）<select name="parentId">${memberOptions('', scopeIds)}</select></label>
-  <label>位置<select name="side"><option value="L">左</option><option value="R">右</option></select></label>
+  <label>上に付く人（親）<select name="parentId">${memberOptions(pre.parentId || '', scopeIds)}</select></label>
+  <label>位置<select name="side"><option value="L" ${pre.side === 'L' ? 'selected' : ''}>左</option><option value="R" ${pre.side === 'R' ? 'selected' : ''}>右</option></select></label>
   <button type="submit">登録する</button></form>`;
 }
 
@@ -568,10 +607,22 @@ async function handleLeader(req, res, url, token) {
   }
   const scope = subtreeIds(leader.rootMemberId);
   const root = store.members[leader.rootMemberId];
+  // 組織図の空き枠から来たプリセット（?parentId=&side=）。担当範囲内の親だけを受け付ける。
+  let preset = null;
+  const pParam = url.searchParams.get('parentId');
+  const sParam = url.searchParams.get('side');
+  if (pParam && scope.has(pParam) && (sParam === 'L' || sParam === 'R')) {
+    preset = { parentId: pParam, side: sParam };
+  }
+  const presetParent = preset ? store.members[preset.parentId] : null;
+  const presetNote = preset
+    ? `<p class="flash ok">組織図で選択中：${esc(presetParent ? presetParent.name + '（' + presetParent.memberId + '）' : preset.parentId)} の${preset.side === 'L' ? '左' : '右'}（下のフォームに反映済みです。そのまま入力するか、プルダウンで変更もできます）</p>`
+    : '';
   const body = `<div class="card"><h2>${esc(leader.name)} さんの組織</h2>
   <p class="small">担当トップ：${esc(root ? root.name + '（' + root.memberId + '）' : leader.rootMemberId)} / ここから下だけが表示・入力できます。</p>
-  <ul class="tree">${renderTree(leader.rootMemberId)}</ul></div>
-  <div class="card"><h3>会員を追加する</h3>${addMemberForm(basePath + '/add', scope)}</div>`;
+  <p class="small">空いている場所の「＋ 左に追加」「＋ 右に追加」を押すと、下の入力フォームにその場所が選ばれた状態になります。</p>
+  <div class="chart-wrap"><ul class="chart-tree"><li>${renderChartTree(leader.rootMemberId, basePath)}</li></ul></div></div>
+  <div class="card"><h3>会員を追加する</h3>${presetNote}${addMemberForm(basePath + '/add', scope, preset)}</div>`;
   return send(res, 200, page('リーダー画面', body, flashFrom(url)));
 }
 
