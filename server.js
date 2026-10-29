@@ -346,6 +346,58 @@ async function updateMemberByLeader(leader, fields) {
   return { result: 'updated', message: '会員情報を修正しました。' };
 }
 
+// ---------- 会員削除（本部・リーダー共通ガード） ----------
+// 配置ミスの訂正として会員を削除できるようにするが、組織図が壊れる消し方はできない
+// ように、削除してよい条件をここに一本化する。削除できるのは「下に誰もいない末端の
+// 会員」だけであり、次のいずれかに当てはまると理由を返して拒否する:
+// - 対象の会員が存在しない
+// - 会社の枠（トップ）である
+// - 下に子（左・右どちらか）がいる（下の会員から先に削除する必要がある）
+// - いずれかのリーダーの担当トップになっている（そのリーダーの専用リンクが壊れる）
+// - その会員について本部の確認待ち（pending）の申告がある（先に要確認リストで対応する）
+function memberDeleteBlockReason(memberId) {
+  const member = store.members[memberId];
+  if (!member) return '対象の会員が見つかりません。';
+  if (memberId === ROOT_ID || member.root) return '会社の枠は削除できません。';
+  const ch = childrenMap().get(memberId) || { L: null, R: null };
+  if (ch.L || ch.R) return 'この会員の下に人がいるため削除できません。下の会員から先に削除してください。';
+  if (store.leaders.some(l => l.rootMemberId === memberId)) {
+    return 'この会員はリーダーの担当トップになっているため削除できません。先に本部のリーダー管理で対応してください。';
+  }
+  if (store.conflicts.some(c => c.status === 'pending' && c.memberId === memberId)) {
+    return 'この会員には本部の確認待ちの申告があるため削除できません。先に要確認リストで対応してください。';
+  }
+  return null;
+}
+// リーダーによる削除。同意・担当範囲のチェックに加え、担当トップ自身は消せない。
+async function deleteMemberByLeader(leader, fields) {
+  if (!leader.consentAt) return { result: 'error', message: '同意が完了していません。' };
+  const memberId = String(fields.memberId || '').trim();
+  const scope = subtreeIds(leader.rootMemberId);
+  if (!store.members[memberId] || !scope.has(memberId)) {
+    return { result: 'error', message: '削除できる会員が見つかりません。' };
+  }
+  if (memberId === leader.rootMemberId) {
+    return { result: 'error', message: '担当トップの会員は削除できません。' };
+  }
+  const reason = memberDeleteBlockReason(memberId);
+  if (reason) return { result: 'error', message: reason };
+  const name = store.members[memberId].name;
+  delete store.members[memberId];
+  await saveStore();
+  return { result: 'deleted', message: `「${name}」を削除しました。` };
+}
+// 本部による削除。共通ガードのみで判定する。
+async function deleteMemberByHq(fields) {
+  const memberId = String(fields.memberId || '').trim();
+  const reason = memberDeleteBlockReason(memberId);
+  if (reason) return { result: 'error', message: reason };
+  const name = store.members[memberId].name;
+  delete store.members[memberId];
+  await saveStore();
+  return { result: 'deleted', message: `「${name}」を削除しました。` };
+}
+
 // ---------- HTTP 共通 ----------
 const sessions = new Map(); // sid -> {hqId, createdAt}
 function parseCookies(req) {
@@ -442,6 +494,8 @@ a.chart-empty:hover{border-color:#94a3b8;color:#64748b;background:#f1f5f9}
 .chart-drill:hover{background:#dcfce7}
 .chart-edit{display:inline-block;margin-top:4px;color:#14532d;font-size:12px;font-weight:600}
 .chart-edit:hover{color:#166534;text-decoration-thickness:2px}
+.chart-delete{display:inline-block;margin-top:4px;margin-left:10px;color:#b91c1c;font-size:12px;font-weight:600}
+.chart-delete:hover{color:#991b1b;text-decoration-thickness:2px}
 .chart-focus-link{display:inline-block;margin-top:4px;color:#1d4ed8;font-size:12px;font-weight:600}
 .chart-focus-link:hover{color:#1e40af;text-decoration-thickness:2px}
 .crumbs{font-size:13.5px;margin:8px 0}.crumbs a{color:#14532d;font-weight:600}
@@ -515,12 +569,13 @@ function collectChartItems(rootId) {
   })(rootId, 0, 0);
   return { byDepth, omitted, cutoff };
 }
-function chartNodeHtml(m, editHref, focusHref) {
+function chartNodeHtml(m, editHref, focusHref, deleteHref) {
   if (m.root) return `<div class="chart-node chart-root">${esc(m.name)}</div>`;
   const c = countsFor(m.memberId);
   const editLink = editHref ? `<br><a class="chart-edit" href="${editHref}">名前を修正</a>` : '';
+  const deleteLink = deleteHref ? `<a class="chart-delete" href="${deleteHref}">削除</a>` : '';
   const focusLink = focusHref ? `<br><a class="chart-focus-link" href="${focusHref}">この人から下を見る</a>` : '';
-  return `<div class="chart-node"><strong>${esc(m.name)}</strong><br><span class="small">ID:${esc(m.memberId)}<br>登録:${esc(m.regDate || '-')}<br>左${c.left}・右${c.right}</span>${editLink}${focusLink}</div>`;
+  return `<div class="chart-node"><strong>${esc(m.name)}</strong><br><span class="small">ID:${esc(m.memberId)}<br>登録:${esc(m.regDate || '-')}<br>左${c.left}・右${c.right}</span>${editLink}${deleteLink}${focusLink}</div>`;
 }
 // 空き枠セルのアンカーID。HTML id として安全な文字だけを使い、それ以外は '-' に置き換える。
 function slotAnchorId(parentId, side) {
@@ -555,6 +610,8 @@ function chartSlotForm(basePath, slot, today, levels, focusId) {
 function renderChartGrid(rootId, basePath, reqLevels, focusCtx, opts) {
   const today = todayJst();
   const viewOnly = !!(opts && opts.viewOnly);
+  // リーダー画面から渡される担当トップの会員ID。その会員の箱には削除リンクを付けない。
+  const leaderRootId = opts && opts.leaderRootId ? opts.leaderRootId : null;
   const { byDepth, omitted, cutoff } = collectChartItems(rootId);
   const focusId = focusCtx ? focusCtx.focusId : null;
   const levelOffset = focusCtx ? focusCtx.levelOffset : 0;
@@ -604,6 +661,15 @@ function renderChartGrid(rootId, basePath, reqLevels, focusCtx, opts) {
             if (reqLevels != null) editHref += `&levels=${reqLevels}`;
             editHref += '#edit-form';
           }
+          // リーダー画面では、担当トップ以外の会員の箱に「削除」リンクも付ける
+          // （削除の確認カードへ移動するだけ。実際に消せるかはサーバー側の共通ガードで判定）。
+          let deleteHref = '';
+          if (!viewOnly && it.m.memberId !== leaderRootId) {
+            deleteHref = `${basePath}?delete=${encodeURIComponent(it.m.memberId)}`;
+            if (focusId) deleteHref += `&focus=${encodeURIComponent(focusId)}`;
+            if (reqLevels != null) deleteHref += `&levels=${reqLevels}`;
+            deleteHref += '#delete-form';
+          }
           // 上限段の会員は、子がいる・いないに関わらず、その会員を先頭に開き直す
           // 「＋ 下を増やす」を出す（空き枠も上限より下にあるため）。明示指定された
           // 表示段数がある場合はリンクにも引き継ぐ。
@@ -615,7 +681,7 @@ function renderChartGrid(rootId, basePath, reqLevels, focusCtx, opts) {
           const focusHref = viewOnly && !it.m.root
             ? `${basePath}?focus=${encodeURIComponent(it.m.memberId)}#chartWrap`
             : '';
-          cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}">${chartNodeHtml(it.m, editHref, focusHref)}${note}${drill}</div>`;
+          cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}">${chartNodeHtml(it.m, editHref, focusHref, deleteHref)}${note}${drill}</div>`;
         } else if (viewOnly) {
           // 見る専用モード（本部）では、親がいる空き場所も入力フォームにせず「空き」枠で見せる
           cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}"><div class="chart-empty">空き</div></div>`;
@@ -768,6 +834,11 @@ async function handleHqTree(req, res, url) {
 }
 async function handleHqMembers(req, res, url) {
   if (!isHq(req)) return redirect(res, '/login');
+  if (req.method === 'POST' && url.pathname === '/hq/members/delete') {
+    const body0 = await readBody(req);
+    const r = await deleteMemberByHq(Object.fromEntries(body0));
+    return redirect(res, back('/hq/members', r.result === 'error' ? 'err' : 'msg', r.message));
+  }
   if (req.method === 'POST') {
     const body0 = await readBody(req);
     const r = await addMember({ type: 'hq' }, Object.fromEntries(body0));
@@ -782,11 +853,32 @@ async function handleHqMembers(req, res, url) {
     const c = countsFor(m.memberId);
     const parent = m.parentId ? store.members[m.parentId] : null;
     const treeHref = m.root ? '/hq/tree' : `/hq/tree?focus=${encodeURIComponent(m.memberId)}`;
-    return `<tr><td>${esc(m.memberId)}</td><td>${esc(m.name)}</td><td>${esc(m.regDate || '')}</td><td>${esc(parent ? parent.name + '（' + parent.memberId + '）' : '')}</td><td>${m.side === 'L' ? '左' : m.side === 'R' ? '右' : ''}</td><td>${c.left}</td><td>${c.right}</td><td>${esc(m.enteredBy || '')}</td><td><a href="${treeHref}">ツリーで見る</a></td></tr>`;
+    const deleteCell = m.root ? '<td></td>' : `<td><a href="/hq/members?delete=${encodeURIComponent(m.memberId)}#delete-form">削除</a></td>`;
+    return `<tr><td>${esc(m.memberId)}</td><td>${esc(m.name)}</td><td>${esc(m.regDate || '')}</td><td>${esc(parent ? parent.name + '（' + parent.memberId + '）' : '')}</td><td>${m.side === 'L' ? '左' : m.side === 'R' ? '右' : ''}</td><td>${c.left}</td><td>${c.right}</td><td>${esc(m.enteredBy || '')}</td><td><a href="${treeHref}">ツリーで見る</a></td>${deleteCell}</tr>`;
   }).join('');
+  // 会員の削除（?delete=<会員ID>）。実在する会員（会社の枠以外）のときだけ確認カードを出す。
+  // 下に人がいる等で消せない場合は理由を表示し、削除ボタン自体を出さない
+  // （実際の可否は POST 時に共通ガード memberDeleteBlockReason でも判定する）。
+  const hqDeleteParam = (url.searchParams.get('delete') || '').trim();
+  const hqDeleteMember = hqDeleteParam && hqDeleteParam !== ROOT_ID && store.members[hqDeleteParam] ? store.members[hqDeleteParam] : null;
+  let hqDeleteCard = '';
+  if (hqDeleteMember) {
+    const parent = hqDeleteMember.parentId ? store.members[hqDeleteMember.parentId] : null;
+    const blockReason = memberDeleteBlockReason(hqDeleteMember.memberId);
+    const actionHtml = blockReason
+      ? `<p class="flash ng">${esc(blockReason)}</p>`
+      : `<p class="small">この操作は元に戻せません。間違えて配置した会員だけを削除してください。</p>
+  <form method="post" action="/hq/members/delete">
+  <input type="hidden" name="memberId" value="${esc(hqDeleteMember.memberId)}">
+  <button class="danger" type="submit">削除する</button> <a class="btn sub" href="/hq/members">キャンセル</a></form>`;
+    hqDeleteCard = `<div class="card" id="delete-form"><h3>会員を削除する</h3>
+  <p class="small">対象：${esc(hqDeleteMember.name)}（${esc(hqDeleteMember.memberId)}） / 登録：${esc(hqDeleteMember.regDate || '-')} / 親：${esc(parent ? parent.name + '（' + parent.memberId + '）' : '')} の${hqDeleteMember.side === 'L' ? '左' : hqDeleteMember.side === 'R' ? '右' : ''}</p>
+  ${actionHtml}</div>`;
+  }
   const body = `${hqNav()}<div class="card"><h2>会員一覧（${memberCount}件）</h2>
   <form method="get" action="/hq/members"><input name="q" value="${esc(q)}" placeholder="名前・会員IDで検索"><button type="submit">検索</button></form>
-  <table><tr><th>会員ID</th><th>名前</th><th>登録日</th><th>親</th><th>位置</th><th>左人数</th><th>右人数</th><th>入力者</th><th>ツリー</th></tr>${rows || '<tr><td colspan="9">該当なし</td></tr>'}</table></div>
+  <table><tr><th>会員ID</th><th>名前</th><th>登録日</th><th>親</th><th>位置</th><th>左人数</th><th>右人数</th><th>入力者</th><th>ツリー</th><th>削除</th></tr>${rows || '<tr><td colspan="10">該当なし</td></tr>'}</table></div>
+  ${hqDeleteCard}
   <div class="card"><h3>会員を追加（本部）</h3>${addMemberForm('/hq/members/add', null)}</div>`;
   return send(res, 200, page('本部：会員一覧', body, flashFrom(url)));
 }
@@ -932,7 +1024,7 @@ async function handleLeader(req, res, url, token) {
     return redirect(res, back(basePath, 'msg', '同意ありがとうございました。入力を始められます。'));
   }
   if (!leader.consentAt) {
-    if (req.method === 'POST' && (url.pathname.endsWith('/add') || url.pathname.endsWith('/edit'))) {
+    if (req.method === 'POST' && (url.pathname.endsWith('/add') || url.pathname.endsWith('/edit') || url.pathname.endsWith('/delete'))) {
       return redirect(res, back(basePath, 'err', '同意が完了してから入力してください。'));
     }
     return send(res, 200, page('同意のお願い', `${CONSENT_TEXT}
@@ -953,6 +1045,16 @@ async function handleLeader(req, res, url, token) {
   if (req.method === 'POST' && url.pathname.endsWith('/edit')) {
     const body0 = await readBody(req);
     const r = await updateMemberByLeader(leader, Object.fromEntries(body0));
+    const focusPart = leaderFocusPart(leader, body0.get('focus'));
+    const lvPart = leaderLevelsPart(body0.get('levels'));
+    const key = r.result === 'error' ? 'err' : 'msg';
+    return redirect(res, `${basePath}?${focusPart}${lvPart}${key}=${encodeURIComponent(r.message)}`);
+  }
+  if (req.method === 'POST' && url.pathname.endsWith('/delete')) {
+    const body0 = await readBody(req);
+    const r = await deleteMemberByLeader(leader, Object.fromEntries(body0));
+    // 削除した会員自身がフォーカス先だった場合は leaderFocusPart が引き継がない
+    // （実在しない会員は無効）ため、その場合は担当トップ表示に戻る。
     const focusPart = leaderFocusPart(leader, body0.get('focus'));
     const lvPart = leaderLevelsPart(body0.get('levels'));
     const key = r.result === 'error' ? 'err' : 'msg';
@@ -1033,7 +1135,7 @@ async function handleLeader(req, res, url, token) {
     if (focusPath[0] !== leader.rootMemberId) { focusId = null; focusPath = null; }
     else levelOffset = focusPath.length - 1;
   }
-  const chart = renderChartGrid(chartTopId, basePath, reqLevels, focusId ? { focusId, levelOffset } : null);
+  const chart = renderChartGrid(chartTopId, basePath, reqLevels, focusId ? { focusId, levelOffset } : null, { leaderRootId: leader.rootMemberId });
   const lvMinus = Math.min(CHART_MAX_DEPTH, Math.max(2, chart.levels - 1));
   const lvPlus = Math.min(CHART_MAX_DEPTH, Math.max(2, chart.levels + 1));
   // 段数の－/＋リンクは、枝フォーカス表示ではフォーカスを引き継ぐ
@@ -1066,6 +1168,28 @@ async function handleLeader(req, res, url, token) {
   ${reqLevels != null ? `<input type="hidden" name="levels" value="${reqLevels}">` : ''}
   <button type="submit">変更を保存</button> <a class="btn sub" href="${basePath}">キャンセル</a></form></div>`;
   }
+  // 会員の削除（?delete=<会員ID>）。実在し担当範囲内にあり、担当トップでない会員だけを
+  // 対象に確認カードを出す。下に人がいる等で消せない場合は理由を表示し、削除ボタン
+  // 自体を出さない（実際の可否は POST 時に共通ガードでも判定する）。
+  const deleteParam = (url.searchParams.get('delete') || '').trim();
+  const deleteTarget = deleteParam && deleteParam !== leader.rootMemberId && store.members[deleteParam] && scope.has(deleteParam)
+    ? store.members[deleteParam] : null;
+  let deleteCard = '';
+  if (deleteTarget) {
+    const parent = deleteTarget.parentId ? store.members[deleteTarget.parentId] : null;
+    const blockReason = memberDeleteBlockReason(deleteTarget.memberId);
+    const actionHtml = blockReason
+      ? `<p class="flash ng">${esc(blockReason)}</p>`
+      : `<p class="small">この操作は元に戻せません。間違えて配置した会員だけを削除してください。</p>
+  <form method="post" action="${basePath}/delete">
+  <input type="hidden" name="memberId" value="${esc(deleteTarget.memberId)}">
+  ${focusId ? `<input type="hidden" name="focus" value="${esc(focusId)}">` : ''}
+  ${reqLevels != null ? `<input type="hidden" name="levels" value="${reqLevels}">` : ''}
+  <button class="danger" type="submit">削除する</button> <a class="btn sub" href="${basePath}">キャンセル</a></form>`;
+    deleteCard = `<div class="card" id="delete-form"><h3>会員を削除する</h3>
+  <p class="small">対象：${esc(deleteTarget.name)}（${esc(deleteTarget.memberId)}） / 登録：${esc(deleteTarget.regDate || '-')} / 親：${esc(parent ? parent.name + '（' + parent.memberId + '）' : '')} の${deleteTarget.side === 'L' ? '左' : deleteTarget.side === 'R' ? '右' : ''}</p>
+  ${actionHtml}</div>`;
+  }
   const body = `${searchCard}<div class="card"><h2>${esc(leader.name)} さんの組織</h2>
   <p class="small">担当トップ：${esc(root ? root.name + '（' + root.memberId + '）' : leader.rootMemberId)} / ここから下だけが表示・入力できます。</p>
   <p class="small">空いている場所の枠に名前を入力して「登録」を押すと、その場所にそのまま登録できます（登録日には今日の日付が入っています。変える場合は日付を変更してください）。下のフォームから親と位置を選んで登録することもできます。</p>
@@ -1075,6 +1199,7 @@ async function handleLeader(req, res, url, token) {
   <div class="chart-bar"><span class="zlabel">表示する段数：</span><span class="zoombox"><a class="zbtn" href="${lvHref(lvMinus)}" aria-label="段数を減らす">−</a><span class="pct">${chart.levels}段</span><a class="zbtn" href="${lvHref(lvPlus)}" aria-label="段数を増やす">＋</a></span><span class="zlabel">図の大きさ：</span><span class="zoombox"><button type="button" id="zOut" aria-label="縮小">−</button><span class="pct" id="zPct">100%</span><button type="button" id="zIn" aria-label="拡大">＋</button><button type="button" id="zFit">等倍</button></span><span class="zlabel">横にスクロールできます</span></div>
   <div class="chart-wrap" id="chartWrap"><div class="chart-box" id="chartBox"><div class="chart-scale" id="chartScale">${chart.html}</div></div></div></div>
   ${editCard}
+  ${deleteCard}
   <div class="card"><h3>会員を追加する</h3>${presetNote}${addMemberForm(basePath + '/add', scope, preset)}</div>
   <script>(function(){var z=1;var scale=document.getElementById('chartScale');var box=document.getElementById('chartBox');var pct=document.getElementById('zPct');if(!scale||!box||!pct)return;function apply(){scale.style.transform='scale('+z+')';box.style.width=Math.ceil(scale.scrollWidth*z)+'px';box.style.height=Math.ceil(scale.scrollHeight*z)+'px';pct.textContent=Math.round(z*100)+'%';}document.getElementById('zIn').addEventListener('click',function(){z=Math.min(2,Math.round(z*1.25*100)/100);apply();});document.getElementById('zOut').addEventListener('click',function(){z=Math.max(0.1,Math.round(z/1.25*100)/100);apply();});document.getElementById('zFit').addEventListener('click',function(){z=1;apply();});apply();})();</script>`;
   return send(res, 200, page('リーダー画面', body, flashFrom(url)));
@@ -1101,11 +1226,11 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/hq') return handleHq(req, res, url);
     if (p === '/hq/tree') return handleHqTree(req, res, url);
-    if (p === '/hq/members' || p === '/hq/members/add') return handleHqMembers(req, res, url);
+    if (p === '/hq/members' || p === '/hq/members/add' || p === '/hq/members/delete') return handleHqMembers(req, res, url);
     if (p === '/hq/leaders') return handleHqLeaders(req, res, url);
     if (p === '/hq/conflicts') return handleHqConflicts(req, res, url);
     if (p === '/hq/export.csv') return handleExportCsv(req, res);
-    const lm = p.match(/^\/leader\/([A-Za-z0-9_-]+)(\/(consent|add|edit))?$/);
+    const lm = p.match(/^\/leader\/([A-Za-z0-9_-]+)(\/(consent|add|edit|delete))?$/);
     if (lm) return handleLeader(req, res, url, lm[1]);
     return send(res, 404, page('見つかりません', '<div class="card"><h2>ページが見つかりません</h2></div>'));
   } catch (e) {
