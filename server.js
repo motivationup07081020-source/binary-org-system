@@ -161,6 +161,12 @@ function verifyPassword(pw, salt, hash) {
   const orig = Buffer.from(hash, 'hex');
   return calc.length === orig.length && crypto.timingSafeEqual(calc, orig);
 }
+function todayJst() {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());
+  const p = {};
+  for (const part of parts) p[part.type] = part.value;
+  return `${p.year}-${p.month}-${p.day}`;
+}
 const MEMBER_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 function validDate(s) {
@@ -241,7 +247,9 @@ async function addMember(actor, fields) {
   const name = String(fields.name || '').trim();
   const parentId = String(fields.parentId || '').trim();
   const side = String(fields.side || '').trim();
-  const regDate = String(fields.regDate || '').trim();
+  let regDate = String(fields.regDate || '').trim();
+  // 登録日が未入力なら、今日（日本時間）を既定にする（組織図内のフォーム・下のフォーム共通）
+  if (!regDate) regDate = todayJst();
   const byName = actor.type === 'hq' ? '本部' : ('リーダー:' + actor.leader.name);
 
   if (memberId === '') {
@@ -347,6 +355,8 @@ ul.tree li{margin:4px 0}.node{background:#fff;border:1px solid #ccc;border-radiu
 .zoombox{display:inline-flex;align-items:center;gap:2px;border:1px solid #bbb;border-radius:8px;padding:2px;background:#fff}
 .zoombox button{border:0;background:transparent;min-width:34px;height:30px;border-radius:6px;font-size:16px;font-weight:700;cursor:pointer;color:#14532d;padding:0 6px}
 .zoombox button:hover{background:#dcfce7}
+.zoombox a.zbtn{display:inline-flex;align-items:center;justify-content:center;min-width:34px;height:30px;border-radius:6px;font-size:16px;font-weight:700;color:#14532d;text-decoration:none;padding:0 6px;box-sizing:border-box}
+.zoombox a.zbtn:hover{background:#dcfce7}
 .zoombox .pct{min-width:48px;text-align:center;font-size:12.5px;color:#555;font-variant-numeric:tabular-nums}
 .chart-wrap{overflow:auto;border:1px solid #e5e7eb;border-radius:8px;background:#fcfdfc;max-height:72vh}
 .chart-box{display:inline-block;vertical-align:top}
@@ -367,6 +377,11 @@ ul.tree li{margin:4px 0}.node{background:#fff;border:1px solid #ccc;border-radiu
 .chart-node.chart-root{background:#14532d;color:#fff;font-weight:bold}
 .chart-slot{display:block;border:1.5px dashed #94a3b8;color:#14532d;background:#f8fafc;border-radius:8px;padding:7px 10px;text-decoration:none;width:132px;text-align:center;box-sizing:border-box;font-size:14px}
 .chart-slot:hover{background:#dcfce7;border-color:#14532d}
+form.chart-slot{margin:0;text-align:left}
+.chart-slot .slot-title{font-size:12.5px;color:#64748b;text-align:center;margin-bottom:2px}
+.chart-slot input{padding:4px 6px;font-size:13px;margin:2px 0;border-radius:5px}
+.chart-slot button{width:100%;padding:5px 0;font-size:13px;margin-top:2px}
+.chart-empty{border:1.5px dashed #dde3ea;color:#b9c2cf;background:#fbfcfd;border-radius:8px;padding:7px 10px;width:132px;text-align:center;box-sizing:border-box;font-size:13px}
 .chart-note{margin-top:4px}
 </style></head><body><header><strong>会員一括管理システム</strong></header><main>${flashHtml}${errHtml}${body}</main></body></html>`;
 }
@@ -403,9 +418,13 @@ function memberOptions(selectedId, scopeIds) {
 // 単独版の組織図（space-2）と同じ考え方で、段（レベル）ごとの行に分けて1枚の図として描く。
 // 各行は「その段の列数＝2^段」の等分グリッドで、会員は自分の二分位置（pos）の列に
 // 箱として置かれ、親子の間はコネクタ行の線でつながる。左端には「○段目」ラベルが付く。
-// 空き枠は親がいる場所だけ「＋ 左に追加／＋ 右に追加」のリンクボタンにし、押すと
-// basePath?parentId=<id>&side=<L|R>#add-form へ移動して入力フォームに親と位置が
-// あらかじめ選ばれた状態になる。親がいない場所は空白のままで箱は出さない。
+// 空き枠は親がいる場所だけ、その場で入力できる小さなフォーム（名前＋登録日＋
+// 隠しフィールドの親・位置・表示段数）にし、「登録」を押すとその場所へ直接登録される
+// （単独版 space-2 のように箱の中で入力が完結する形）。親がいない場所は空白のままで
+// 箱は出さない。互換のため ?parentId=<id>&side=<L|R>#add-form のプリセット導線も残す。
+// 「表示する段数」（?levels=、2〜10）をデータの段数より大きくすると、データより
+// 先の段は全位置を薄い「空き」枠で埋めて、space-2のように先の段まで1枚の図として
+// 見せる。段数はデータが必要な段数より少なくはならない（データが優先）。
 const CHART_MAX_DEPTH = 10;
 const CHART_COL_W = 140;
 function collectChartItems(rootId) {
@@ -437,39 +456,75 @@ function chartNodeHtml(m) {
   const c = countsFor(m.memberId);
   return `<div class="chart-node"><strong>${esc(m.name)}</strong><br><span class="small">ID:${esc(m.memberId)}<br>登録:${esc(m.regDate || '-')}<br>左${c.left}・右${c.right}</span></div>`;
 }
-function renderChartGrid(rootId, basePath) {
+// 空き枠の中に置く、その場で登録できる小さなフォーム。
+// 登録後の戻り先で表示段数を維持するため、現在の表示段数（levels）も隠しフィールドで送る。
+function chartSlotForm(basePath, slot, today, levels) {
+  const sideLabel = slot.side === 'L' ? '左' : '右';
+  return `<form class="chart-slot" method="post" action="${basePath}/add"><div class="slot-title">＋ ${sideLabel}に追加</div>`
+    + `<input type="text" name="name" placeholder="名前" maxlength="100">`
+    + `<input type="date" name="regDate" value="${today}">`
+    + `<input type="hidden" name="parentId" value="${esc(slot.parentId)}">`
+    + `<input type="hidden" name="side" value="${slot.side}">`
+    + `<input type="hidden" name="levels" value="${levels}">`
+    + `<button type="submit">登録</button></form>`;
+}
+function renderChartGrid(rootId, basePath, reqLevels) {
+  const today = todayJst();
   const { byDepth, omitted } = collectChartItems(rootId);
   const depths = [...byDepth.keys()].sort((a, b) => a - b);
-  const maxDepth = depths.length ? depths[depths.length - 1] : 0;
+  const floorDepth = depths.length ? depths[depths.length - 1] : 0;
+  const floorLevels = floorDepth + 1;
+  // 表示段数：指定があってもデータが必要な段数（従来の表示）より少なくはしない
+  let displayLevels = floorLevels;
+  if (reqLevels != null) displayLevels = Math.max(floorLevels, reqLevels);
+  displayLevels = Math.max(2, displayLevels);
+  const maxDepth = displayLevels - 1;
   const cols = Math.pow(2, maxDepth);
   const gridStyle = `grid-template-columns:repeat(${cols},${CHART_COL_W}px)`;
   const cellStyle = (depth, pos) => {
     const span = Math.pow(2, maxDepth - depth);
     return `grid-column:${pos * span + 1} / span ${span}`;
   };
+  const connCell = (depth, pos) => `<div class="cn" style="${cellStyle(depth, pos)}"><i class="p"></i><i class="h"></i><i class="l"></i><i class="r"></i></div>`;
   let html = '';
-  for (const d of depths) {
-    const items = byDepth.get(d).slice().sort((a, b) => a.pos - b.pos);
+  for (let d = 0; d <= maxDepth; d++) {
+    const items = (byDepth.get(d) || []).slice().sort((a, b) => a.pos - b.pos);
     let cells = '';
-    for (const it of items) {
-      if (it.type === 'member') {
-        const note = omitted.has(it.m.memberId) ? `<div class="small chart-note">（これより下は省略しています）</div>` : '';
-        cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}">${chartNodeHtml(it.m)}${note}</div>`;
-      } else {
-        cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}"><a class="chart-slot" href="${basePath}?parentId=${encodeURIComponent(it.parentId)}&side=${it.side}#add-form">＋ ${it.side === 'L' ? '左' : '右'}に追加</a></div>`;
+    if (d > floorDepth) {
+      // データより先の段は、全位置を薄い「空き」枠で埋めて1枚の図として見せる（追加ボタンにはしない）
+      for (let pos = 0; pos < Math.pow(2, d); pos++) {
+        cells += `<div class="chart-cell" style="${cellStyle(d, pos)}"><div class="chart-empty">空き</div></div>`;
+      }
+    } else {
+      for (const it of items) {
+        if (it.type === 'member') {
+          const note = omitted.has(it.m.memberId) ? `<div class="small chart-note">（これより下は省略しています）</div>` : '';
+          cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}">${chartNodeHtml(it.m)}${note}</div>`;
+        } else {
+          cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}">${chartSlotForm(basePath, it, today, displayLevels)}</div>`;
+        }
       }
     }
     html += `<div class="chart-level"><div class="chart-lvl">${d + 1}段目</div><div class="chart-row" style="${gridStyle}">${cells}</div></div>`;
     if (d < maxDepth) {
       let conns = '';
-      for (const it of items) {
-        if (it.type !== 'member') continue;
-        conns += `<div class="cn" style="${cellStyle(d, it.pos)}"><i class="p"></i><i class="h"></i><i class="l"></i><i class="r"></i></div>`;
+      if (maxDepth > floorDepth && d >= floorDepth) {
+        // データより先の段へつながる行では、その段の全ての箱から線を引いて図を1つにつなぐ
+        if (d > floorDepth) {
+          for (let pos = 0; pos < Math.pow(2, d); pos++) conns += connCell(d, pos);
+        } else {
+          for (const it of items) conns += connCell(d, it.pos);
+        }
+      } else {
+        for (const it of items) {
+          if (it.type !== 'member') continue;
+          conns += connCell(d, it.pos);
+        }
       }
       html += `<div class="chart-level"><div class="chart-lvl chart-lvl-sp"></div><div class="chart-conn" style="${gridStyle}">${conns}</div></div>`;
     }
   }
-  return html;
+  return { html, levels: displayLevels };
 }
 function addMemberForm(action, scopeIds, preset) {
   const pre = preset || {};
@@ -691,7 +746,16 @@ async function handleLeader(req, res, url, token) {
   if (req.method === 'POST' && url.pathname.endsWith('/add')) {
     const body0 = await readBody(req);
     const r = await addMember({ type: 'leader', leader }, Object.fromEntries(body0));
-    return redirect(res, back(basePath, r.result === 'error' ? 'err' : 'msg', r.message));
+    // 組織図内のフォームからの登録では、見ていた表示段数（levels）を引き継いで戻る。
+    // 2〜10の整数のときだけ引き継ぎ、それ以外は無視する（下のフォーム等は従来どおり）。
+    const lvRaw3 = String(body0.get('levels') || '').trim();
+    let lvPart = '';
+    if (/^\d+$/.test(lvRaw3)) {
+      const lv3 = parseInt(lvRaw3, 10);
+      if (lv3 >= 2 && lv3 <= CHART_MAX_DEPTH) lvPart = `levels=${lv3}&`;
+    }
+    const key = r.result === 'error' ? 'err' : 'msg';
+    return redirect(res, `${basePath}?${lvPart}${key}=${encodeURIComponent(r.message)}`);
   }
   const scope = subtreeIds(leader.rootMemberId);
   const root = store.members[leader.rootMemberId];
@@ -706,11 +770,21 @@ async function handleLeader(req, res, url, token) {
   const presetNote = preset
     ? `<p class="flash ok">組織図で選択中：${esc(presetParent ? presetParent.name + '（' + presetParent.memberId + '）' : preset.parentId)} の${preset.side === 'L' ? '左' : '右'}（下のフォームに反映済みです。そのまま入力するか、プルダウンで変更もできます）</p>`
     : '';
+  // 表示する段数（?levels=）。2〜10に丸め、データが必要な段数より少なくはならない（renderChartGrid側で下限を確保）。
+  let reqLevels = null;
+  const lvRaw = url.searchParams.get('levels');
+  if (lvRaw !== null && /^\d+$/.test(lvRaw.trim())) {
+    reqLevels = Math.min(CHART_MAX_DEPTH, Math.max(2, parseInt(lvRaw, 10)));
+  }
+  const chart = renderChartGrid(leader.rootMemberId, basePath, reqLevels);
+  const lvMinus = Math.min(CHART_MAX_DEPTH, Math.max(2, chart.levels - 1));
+  const lvPlus = Math.min(CHART_MAX_DEPTH, Math.max(2, chart.levels + 1));
   const body = `<div class="card"><h2>${esc(leader.name)} さんの組織</h2>
   <p class="small">担当トップ：${esc(root ? root.name + '（' + root.memberId + '）' : leader.rootMemberId)} / ここから下だけが表示・入力できます。</p>
-  <p class="small">空いている場所の「＋ 左に追加」「＋ 右に追加」を押すと、下の入力フォームにその場所が選ばれた状態になります。</p>
-  <div class="chart-bar"><span class="zlabel">図の大きさ：</span><span class="zoombox"><button type="button" id="zOut" aria-label="縮小">−</button><span class="pct" id="zPct">100%</span><button type="button" id="zIn" aria-label="拡大">＋</button><button type="button" id="zFit">等倍</button></span><span class="zlabel">横にスクロールできます</span></div>
-  <div class="chart-wrap" id="chartWrap"><div class="chart-box" id="chartBox"><div class="chart-scale" id="chartScale">${renderChartGrid(leader.rootMemberId, basePath)}</div></div></div></div>
+  <p class="small">空いている場所の枠に名前を入力して「登録」を押すと、その場所にそのまま登録できます（登録日には今日の日付が入っています。変える場合は日付を変更してください）。下のフォームから親と位置を選んで登録することもできます。</p>
+  <p class="small">「表示する段数」の＋を押すと、まだ誰もいない先の段まで図を広げて見られます。</p>
+  <div class="chart-bar"><span class="zlabel">表示する段数：</span><span class="zoombox"><a class="zbtn" href="${basePath}?levels=${lvMinus}" aria-label="段数を減らす">−</a><span class="pct">${chart.levels}段</span><a class="zbtn" href="${basePath}?levels=${lvPlus}" aria-label="段数を増やす">＋</a></span><span class="zlabel">図の大きさ：</span><span class="zoombox"><button type="button" id="zOut" aria-label="縮小">−</button><span class="pct" id="zPct">100%</span><button type="button" id="zIn" aria-label="拡大">＋</button><button type="button" id="zFit">等倍</button></span><span class="zlabel">横にスクロールできます</span></div>
+  <div class="chart-wrap" id="chartWrap"><div class="chart-box" id="chartBox"><div class="chart-scale" id="chartScale">${chart.html}</div></div></div></div>
   <div class="card"><h3>会員を追加する</h3>${presetNote}${addMemberForm(basePath + '/add', scope, preset)}</div>
   <script>(function(){var z=1;var scale=document.getElementById('chartScale');var box=document.getElementById('chartBox');var pct=document.getElementById('zPct');if(!scale||!box||!pct)return;function apply(){scale.style.transform='scale('+z+')';box.style.width=Math.ceil(scale.scrollWidth*z)+'px';box.style.height=Math.ceil(scale.scrollHeight*z)+'px';pct.textContent=Math.round(z*100)+'%';}document.getElementById('zIn').addEventListener('click',function(){z=Math.min(2,Math.round(z*1.25*100)/100);apply();});document.getElementById('zOut').addEventListener('click',function(){z=Math.max(0.1,Math.round(z/1.25*100)/100);apply();});document.getElementById('zFit').addEventListener('click',function(){z=1;apply();});apply();})();</script>`;
   return send(res, 200, page('リーダー画面', body, flashFrom(url)));
