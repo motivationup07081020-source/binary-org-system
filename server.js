@@ -210,19 +210,48 @@ function sameContent(a, b) {
   return a.name === b.name && a.parentId === b.parentId && a.side === b.side && a.regDate === b.regDate;
 }
 
+// ---------- 会員IDの自動採番 ----------
+// 人が入力しない場合の採番ルール:
+// - 既存の数字だけの会員IDの最大値 + 1（文字列）。数字IDが無ければ 1 から。
+// - 既存会員・本部の確認待ち申告（pending）が使っているIDは避け、空くまで繰り上げる。
+// - 数字でないID（'T1' や 'A-100' のような旧ID）は採番に影響しない。
+// - 大きな数字でも桁あふれしないよう BigInt で計算する（'007' のような表記も数値として扱う）。
+function nextAutoMemberId() {
+  const taken = new Set(Object.keys(store.members));
+  for (const c of store.conflicts) {
+    if (c.status === 'pending' && c.memberId) taken.add(c.memberId);
+  }
+  let max = null;
+  for (const id of taken) {
+    if (/^\d+$/.test(id)) {
+      const v = BigInt(id);
+      if (max === null || v > max) max = v;
+    }
+  }
+  let n = max === null ? 1n : max + 1n;
+  while (taken.has(String(n))) n += 1n;
+  return String(n);
+}
+
 // ---------- 会員追加（本部・リーダー共通ロジック） ----------
 // actor: {type:'hq'} | {type:'leader', leader}
 // 戻り値: {result:'created'|'duplicate'|'conflict'|'error', message}
 async function addMember(actor, fields) {
-  const memberId = String(fields.memberId || '').trim();
+  let memberId = String(fields.memberId || '').trim();
   const name = String(fields.name || '').trim();
   const parentId = String(fields.parentId || '').trim();
   const side = String(fields.side || '').trim();
   const regDate = String(fields.regDate || '').trim();
   const byName = actor.type === 'hq' ? '本部' : ('リーダー:' + actor.leader.name);
 
-  if (!MEMBER_ID_RE.test(memberId)) return { result: 'error', message: '会員IDは半角英数・ハイフン・アンダースコアで入力してください。' };
-  if (memberId === ROOT_ID) return { result: 'error', message: 'その会員IDは使えません。' };
+  if (memberId === '') {
+    // 会員IDが送られてこなければ、システムが自動で採番する（人が入力する欄はフォームから無くした）
+    memberId = nextAutoMemberId();
+  } else {
+    // 明示的に会員IDが指定された場合は従来どおり検証する（テスト・取り込み用）
+    if (!MEMBER_ID_RE.test(memberId)) return { result: 'error', message: '会員IDは半角英数・ハイフン・アンダースコアで入力してください。' };
+    if (memberId === ROOT_ID) return { result: 'error', message: 'その会員IDは使えません。' };
+  }
   if (!name || name.length > 100) return { result: 'error', message: '名前を入力してください（100文字まで）。' };
   if (!validDate(regDate)) return { result: 'error', message: '登録日は YYYY-MM-DD 形式の正しい日付で入力してください。' };
   if (side !== 'L' && side !== 'R') return { result: 'error', message: '位置は左か右を選んでください。' };
@@ -251,7 +280,7 @@ async function addMember(actor, fields) {
   }
   store.members[memberId] = { ...claimed, enteredBy: byName, createdAt: new Date().toISOString() };
   await saveStore();
-  return { result: 'created', message: '登録しました。' };
+  return { result: 'created', message: `登録しました。会員IDは ${memberId} です。` };
 }
 function pushConflict(kind, claimed, existingSnap, byName) {
   const dup = store.conflicts.find(c => c.status === 'pending' && c.memberId === claimed.memberId &&
@@ -313,20 +342,30 @@ ul.tree{list-style:none;padding-left:18px;border-left:2px solid #bbf7d0;margin:4
 ul.tree li{margin:4px 0}.node{background:#fff;border:1px solid #ccc;border-radius:8px;padding:6px 10px;display:inline-block}
 .root-node{background:#14532d;color:#fff;font-weight:bold}
 .small{font-size:12px;color:#555}.nav a{margin-right:12px}
-.chart-wrap{overflow-x:auto;padding:6px 2px}
-.chart-tree,.chart-tree ul{display:flex;justify-content:center;list-style:none;margin:0;padding:0;position:relative}
-.chart-tree ul{padding-top:22px}
-.chart-tree li{display:flex;flex-direction:column;align-items:center;position:relative;padding:22px 7px 0}
-.chart-tree ul::before{content:'';position:absolute;top:0;left:50%;border-left:2px solid #86c98f;height:22px}
-.chart-tree li::before,.chart-tree li::after{content:'';position:absolute;top:0;right:50%;border-top:2px solid #86c98f;width:50%;height:22px}
-.chart-tree li::after{right:auto;left:50%;border-left:2px solid #86c98f}
-.chart-tree li:only-child::before,.chart-tree li:only-child::after{display:none}
-.chart-tree li:only-child{padding-top:0}
-.chart-tree li:first-child::before,.chart-tree li:last-child::after{border:0 none}
-.chart-tree li:last-child::before{border-right:2px solid #86c98f}
-.chart-node{background:#fff;border:1.5px solid #14532d;border-radius:8px;padding:6px 10px;text-align:center;min-width:118px;line-height:1.45}
+.chart-bar{display:flex;align-items:center;gap:8px;margin:8px 0}
+.chart-bar .zlabel{font-size:12px;color:#555}
+.zoombox{display:inline-flex;align-items:center;gap:2px;border:1px solid #bbb;border-radius:8px;padding:2px;background:#fff}
+.zoombox button{border:0;background:transparent;min-width:34px;height:30px;border-radius:6px;font-size:16px;font-weight:700;cursor:pointer;color:#14532d;padding:0 6px}
+.zoombox button:hover{background:#dcfce7}
+.zoombox .pct{min-width:48px;text-align:center;font-size:12.5px;color:#555;font-variant-numeric:tabular-nums}
+.chart-wrap{overflow:auto;border:1px solid #e5e7eb;border-radius:8px;background:#fcfdfc;max-height:72vh}
+.chart-box{display:inline-block;vertical-align:top}
+.chart-scale{display:inline-block;vertical-align:top;transform-origin:0 0}
+.chart-level{display:flex;align-items:stretch}
+.chart-lvl{flex:0 0 50px;position:sticky;left:0;z-index:3;background:#14532d;color:#fff;font-weight:700;font-size:12.5px;display:flex;align-items:center;justify-content:center}
+.chart-lvl-sp{background:#fcfdfc}
+.chart-row{display:grid;align-items:start}
+.chart-cell{display:flex;flex-direction:column;align-items:center;padding:2px 4px;box-sizing:border-box}
+.chart-conn{display:grid;height:20px}
+.cn{position:relative;height:20px}
+.cn i{position:absolute;display:block;background:#86c98f}
+.cn .p{left:50%;top:0;width:2px;height:10px;margin-left:-1px}
+.cn .h{left:25%;top:9px;width:50%;height:2px}
+.cn .l{left:25%;top:10px;width:2px;height:10px;margin-left:-1px}
+.cn .r{left:75%;top:10px;width:2px;height:10px;margin-left:-1px}
+.chart-node{background:#fff;border:1.5px solid #14532d;border-radius:8px;padding:6px 10px;text-align:center;width:132px;box-sizing:border-box;line-height:1.45}
 .chart-node.chart-root{background:#14532d;color:#fff;font-weight:bold}
-.chart-slot{display:block;border:1.5px dashed #94a3b8;color:#14532d;background:#f8fafc;border-radius:8px;padding:7px 10px;text-decoration:none;min-width:118px;text-align:center;box-sizing:border-box;font-size:14px}
+.chart-slot{display:block;border:1.5px dashed #94a3b8;color:#14532d;background:#f8fafc;border-radius:8px;padding:7px 10px;text-decoration:none;width:132px;text-align:center;box-sizing:border-box;font-size:14px}
 .chart-slot:hover{background:#dcfce7;border-color:#14532d}
 .chart-note{margin-top:4px}
 </style></head><body><header><strong>会員一括管理システム</strong></header><main>${flashHtml}${errHtml}${body}</main></body></html>`;
@@ -361,32 +400,81 @@ function memberOptions(selectedId, scopeIds) {
   return list.map(m => `<option value="${esc(m.memberId)}" ${m.memberId === selectedId ? 'selected' : ''}>${esc(m.name)}（${esc(m.memberId)}）</option>`).join('');
 }
 // ---------- 組織図チャート描画（リーダー画面用） ----------
-// 会員を箱で表示し、左右の子を線でつなぐ。空き枠は「＋ 左に追加／＋ 右に追加」の
-// リンクボタンにし、押すと basePath?parentId=<id>&side=<L|R>#add-form へ移動して
-// 入力フォームに親と位置があらかじめ選ばれた状態になる。
+// 単独版の組織図（space-2）と同じ考え方で、段（レベル）ごとの行に分けて1枚の図として描く。
+// 各行は「その段の列数＝2^段」の等分グリッドで、会員は自分の二分位置（pos）の列に
+// 箱として置かれ、親子の間はコネクタ行の線でつながる。左端には「○段目」ラベルが付く。
+// 空き枠は親がいる場所だけ「＋ 左に追加／＋ 右に追加」のリンクボタンにし、押すと
+// basePath?parentId=<id>&side=<L|R>#add-form へ移動して入力フォームに親と位置が
+// あらかじめ選ばれた状態になる。親がいない場所は空白のままで箱は出さない。
 const CHART_MAX_DEPTH = 10;
-function renderChartTree(rootId, basePath, depth = 0) {
-  const m = store.members[rootId];
-  if (!m) return '';
-  const c = countsFor(rootId);
-  const node = m.root
-    ? `<div class="chart-node chart-root">${esc(m.name)}</div>`
-    : `<div class="chart-node"><strong>${esc(m.name)}</strong><br><span class="small">ID:${esc(m.memberId)}<br>登録:${esc(m.regDate || '-')}<br>左${c.left}・右${c.right}</span></div>`;
+const CHART_COL_W = 140;
+function collectChartItems(rootId) {
   const map = childrenMap();
-  const ch = map.get(rootId) || { L: null, R: null };
-  if (depth >= CHART_MAX_DEPTH) {
-    return (ch.L || ch.R) ? `${node}<div class="small chart-note">（これより下は省略しています）</div>` : node;
+  const byDepth = new Map(); // depth -> [{type:'member'|'slot', pos, m?, parentId?, side?}]
+  const omitted = new Set(); // 上限段で子がいる会員（省略注記を付ける）
+  const push = (depth, item) => {
+    if (!byDepth.has(depth)) byDepth.set(depth, []);
+    byDepth.get(depth).push(item);
+  };
+  (function walk(id, depth, pos) {
+    const m = store.members[id];
+    if (!m) return;
+    push(depth, { type: 'member', pos, m });
+    const ch = map.get(id) || { L: null, R: null };
+    if (depth >= CHART_MAX_DEPTH) {
+      if (ch.L || ch.R) omitted.add(id);
+      return;
+    }
+    if (ch.L) walk(ch.L.memberId, depth + 1, pos * 2);
+    else push(depth + 1, { type: 'slot', pos: pos * 2, parentId: id, side: 'L' });
+    if (ch.R) walk(ch.R.memberId, depth + 1, pos * 2 + 1);
+    else push(depth + 1, { type: 'slot', pos: pos * 2 + 1, parentId: id, side: 'R' });
+  })(rootId, 0, 0);
+  return { byDepth, omitted };
+}
+function chartNodeHtml(m) {
+  if (m.root) return `<div class="chart-node chart-root">${esc(m.name)}</div>`;
+  const c = countsFor(m.memberId);
+  return `<div class="chart-node"><strong>${esc(m.name)}</strong><br><span class="small">ID:${esc(m.memberId)}<br>登録:${esc(m.regDate || '-')}<br>左${c.left}・右${c.right}</span></div>`;
+}
+function renderChartGrid(rootId, basePath) {
+  const { byDepth, omitted } = collectChartItems(rootId);
+  const depths = [...byDepth.keys()].sort((a, b) => a - b);
+  const maxDepth = depths.length ? depths[depths.length - 1] : 0;
+  const cols = Math.pow(2, maxDepth);
+  const gridStyle = `grid-template-columns:repeat(${cols},${CHART_COL_W}px)`;
+  const cellStyle = (depth, pos) => {
+    const span = Math.pow(2, maxDepth - depth);
+    return `grid-column:${pos * span + 1} / span ${span}`;
+  };
+  let html = '';
+  for (const d of depths) {
+    const items = byDepth.get(d).slice().sort((a, b) => a.pos - b.pos);
+    let cells = '';
+    for (const it of items) {
+      if (it.type === 'member') {
+        const note = omitted.has(it.m.memberId) ? `<div class="small chart-note">（これより下は省略しています）</div>` : '';
+        cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}">${chartNodeHtml(it.m)}${note}</div>`;
+      } else {
+        cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}"><a class="chart-slot" href="${basePath}?parentId=${encodeURIComponent(it.parentId)}&side=${it.side}#add-form">＋ ${it.side === 'L' ? '左' : '右'}に追加</a></div>`;
+      }
+    }
+    html += `<div class="chart-level"><div class="chart-lvl">${d + 1}段目</div><div class="chart-row" style="${gridStyle}">${cells}</div></div>`;
+    if (d < maxDepth) {
+      let conns = '';
+      for (const it of items) {
+        if (it.type !== 'member') continue;
+        conns += `<div class="cn" style="${cellStyle(d, it.pos)}"><i class="p"></i><i class="h"></i><i class="l"></i><i class="r"></i></div>`;
+      }
+      html += `<div class="chart-level"><div class="chart-lvl chart-lvl-sp"></div><div class="chart-conn" style="${gridStyle}">${conns}</div></div>`;
+    }
   }
-  const slot = side => `<a class="chart-slot" href="${basePath}?parentId=${encodeURIComponent(rootId)}&side=${side}#add-form">＋ ${side === 'L' ? '左' : '右'}に追加</a>`;
-  const l = ch.L ? renderChartTree(ch.L.memberId, basePath, depth + 1) : slot('L');
-  const r = ch.R ? renderChartTree(ch.R.memberId, basePath, depth + 1) : slot('R');
-  return `${node}<ul><li>${l}</li><li>${r}</li></ul>`;
+  return html;
 }
 function addMemberForm(action, scopeIds, preset) {
   const pre = preset || {};
   return `<form method="post" action="${action}" id="add-form">
   <label>名前<input name="name" required maxlength="100"></label>
-  <label>会員ID<input name="memberId" required maxlength="64" placeholder="半角英数・-・_"></label>
   <label>登録日<input name="regDate" required type="date"></label>
   <label>上に付く人（親）<select name="parentId">${memberOptions(pre.parentId || '', scopeIds)}</select></label>
   <label>位置<select name="side"><option value="L" ${pre.side === 'L' ? 'selected' : ''}>左</option><option value="R" ${pre.side === 'R' ? 'selected' : ''}>右</option></select></label>
@@ -621,8 +709,10 @@ async function handleLeader(req, res, url, token) {
   const body = `<div class="card"><h2>${esc(leader.name)} さんの組織</h2>
   <p class="small">担当トップ：${esc(root ? root.name + '（' + root.memberId + '）' : leader.rootMemberId)} / ここから下だけが表示・入力できます。</p>
   <p class="small">空いている場所の「＋ 左に追加」「＋ 右に追加」を押すと、下の入力フォームにその場所が選ばれた状態になります。</p>
-  <div class="chart-wrap"><ul class="chart-tree"><li>${renderChartTree(leader.rootMemberId, basePath)}</li></ul></div></div>
-  <div class="card"><h3>会員を追加する</h3>${presetNote}${addMemberForm(basePath + '/add', scope, preset)}</div>`;
+  <div class="chart-bar"><span class="zlabel">図の大きさ：</span><span class="zoombox"><button type="button" id="zOut" aria-label="縮小">−</button><span class="pct" id="zPct">100%</span><button type="button" id="zIn" aria-label="拡大">＋</button><button type="button" id="zFit">等倍</button></span><span class="zlabel">横にスクロールできます</span></div>
+  <div class="chart-wrap" id="chartWrap"><div class="chart-box" id="chartBox"><div class="chart-scale" id="chartScale">${renderChartGrid(leader.rootMemberId, basePath)}</div></div></div></div>
+  <div class="card"><h3>会員を追加する</h3>${presetNote}${addMemberForm(basePath + '/add', scope, preset)}</div>
+  <script>(function(){var z=1;var scale=document.getElementById('chartScale');var box=document.getElementById('chartBox');var pct=document.getElementById('zPct');if(!scale||!box||!pct)return;function apply(){scale.style.transform='scale('+z+')';box.style.width=Math.ceil(scale.scrollWidth*z)+'px';box.style.height=Math.ceil(scale.scrollHeight*z)+'px';pct.textContent=Math.round(z*100)+'%';}document.getElementById('zIn').addEventListener('click',function(){z=Math.min(2,Math.round(z*1.25*100)/100);apply();});document.getElementById('zOut').addEventListener('click',function(){z=Math.max(0.1,Math.round(z/1.25*100)/100);apply();});document.getElementById('zFit').addEventListener('click',function(){z=1;apply();});apply();})();</script>`;
   return send(res, 200, page('リーダー画面', body, flashFrom(url)));
 }
 
