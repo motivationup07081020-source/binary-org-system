@@ -320,6 +320,32 @@ function pushConflict(kind, claimed, existingSnap, byName) {
   return c;
 }
 
+// ---------- 会員情報の修正（リーダー） ----------
+// リーダーが自分の担当範囲内にある会員の名前・登録日を直接修正する。
+// これは担当リーダーによる訂正であり、新規登録の申告ではないため、本部の要確認リスト
+// （conflicts）は作らない。会員ID・親・位置・入力者は変更しない。
+async function updateMemberByLeader(leader, fields) {
+  if (!leader.consentAt) return { result: 'error', message: '同意が完了していません。' };
+  const memberId = String(fields.memberId || '').trim();
+  const member = store.members[memberId];
+  const scope = subtreeIds(leader.rootMemberId);
+  if (!member || !scope.has(memberId)) {
+    return { result: 'error', message: '修正できる会員が見つかりません。' };
+  }
+  const name = String(fields.name || '').trim();
+  if (!name || name.length > 100) return { result: 'error', message: '名前を入力してください（100文字まで）。' };
+  const submittedDate = String(fields.regDate || '').trim();
+  let regDate = member.regDate || '';
+  if (submittedDate) {
+    if (!validDate(submittedDate)) return { result: 'error', message: '登録日は YYYY-MM-DD 形式の正しい日付で入力してください。' };
+    regDate = submittedDate;
+  }
+  member.name = name;
+  member.regDate = regDate;
+  await saveStore();
+  return { result: 'updated', message: '会員情報を修正しました。' };
+}
+
 // ---------- HTTP 共通 ----------
 const sessions = new Map(); // sid -> {hqId, createdAt}
 function parseCookies(req) {
@@ -414,6 +440,8 @@ a.chart-empty:hover{border-color:#94a3b8;color:#64748b;background:#f1f5f9}
 .chart-note{margin-top:4px}
 .chart-drill{display:inline-block;margin-top:5px;background:#fff;color:#14532d;border:1.5px solid #14532d;border-radius:6px;padding:4px 10px;font-size:12.5px;font-weight:700;text-decoration:none}
 .chart-drill:hover{background:#dcfce7}
+.chart-edit{display:inline-block;margin-top:4px;color:#14532d;font-size:12px;font-weight:600}
+.chart-edit:hover{color:#166534;text-decoration-thickness:2px}
 .crumbs{font-size:13.5px;margin:8px 0}.crumbs a{color:#14532d;font-weight:600}
 </style></head><body><header><strong>会員一括管理システム</strong></header><main>${flashHtml}${errHtml}${body}</main></body></html>`;
 }
@@ -485,10 +513,11 @@ function collectChartItems(rootId) {
   })(rootId, 0, 0);
   return { byDepth, omitted, cutoff };
 }
-function chartNodeHtml(m) {
+function chartNodeHtml(m, editHref) {
   if (m.root) return `<div class="chart-node chart-root">${esc(m.name)}</div>`;
   const c = countsFor(m.memberId);
-  return `<div class="chart-node"><strong>${esc(m.name)}</strong><br><span class="small">ID:${esc(m.memberId)}<br>登録:${esc(m.regDate || '-')}<br>左${c.left}・右${c.right}</span></div>`;
+  const editLink = editHref ? `<br><a class="chart-edit" href="${editHref}">名前を修正</a>` : '';
+  return `<div class="chart-node"><strong>${esc(m.name)}</strong><br><span class="small">ID:${esc(m.memberId)}<br>登録:${esc(m.regDate || '-')}<br>左${c.left}・右${c.right}</span>${editLink}</div>`;
 }
 // 空き枠セルのアンカーID。HTML id として安全な文字だけを使い、それ以外は '-' に置き換える。
 function slotAnchorId(parentId, side) {
@@ -556,13 +585,19 @@ function renderChartGrid(rootId, basePath, reqLevels, focusCtx) {
       for (const it of items) {
         if (it.type === 'member') {
           const note = omitted.has(it.m.memberId) ? `<div class="small chart-note">（これより下は省略しています）</div>` : '';
+          // 会員の箱から、その会員を対象にした修正フォームへ移動できるようにする。
+          // いま見ている枝（focus）と、明示指定された表示段数（levels）があれば引き継ぐ。
+          let editHref = `${basePath}?edit=${encodeURIComponent(it.m.memberId)}`;
+          if (focusId) editHref += `&focus=${encodeURIComponent(focusId)}`;
+          if (reqLevels != null) editHref += `&levels=${reqLevels}`;
+          editHref += '#edit-form';
           // 上限段の会員は、子がいる・いないに関わらず、その会員を先頭に開き直す
           // 「＋ 下を増やす」を出す（空き枠も上限より下にあるため）。明示指定された
           // 表示段数がある場合はリンクにも引き継ぐ。
           const drill = cutoff.has(it.m.memberId)
             ? `<a class="chart-drill" href="${basePath}?focus=${encodeURIComponent(it.m.memberId)}${reqLevels != null ? '&levels=' + reqLevels : ''}#chartWrap">＋ 下を増やす</a>`
             : '';
-          cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}">${chartNodeHtml(it.m)}${note}${drill}</div>`;
+          cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}">${chartNodeHtml(it.m, editHref)}${note}${drill}</div>`;
         } else {
           cells += `<div class="chart-cell" id="${slotAnchorId(it.parentId, it.side)}" style="${cellStyle(d, it.pos)}">${chartSlotForm(basePath, it, today, displayLevels, focusId)}</div>`;
         }
@@ -790,6 +825,21 @@ const CONSENT_TEXT = `
 <li>同じ会員IDで違う内容が入力された場合は、勝手に上書きされず、本部の確認に回ります。</li>
 </ul>
 <p>内容を確認し、同意いただける場合は「同意して始める」を押してください。</p></div>`;
+function leaderFocusPart(leader, rawFocus) {
+  const focus = String(rawFocus || '').trim();
+  if (focus && store.members[focus] && subtreeIds(leader.rootMemberId).has(focus)) {
+    return `focus=${encodeURIComponent(focus)}&`;
+  }
+  return '';
+}
+function leaderLevelsPart(rawLevels) {
+  const raw = String(rawLevels || '').trim();
+  if (/^\d+$/.test(raw)) {
+    const levels = parseInt(raw, 10);
+    if (levels >= 2 && levels <= CHART_MAX_DEPTH) return `levels=${levels}&`;
+  }
+  return '';
+}
 async function handleLeader(req, res, url, token) {
   const leader = getLeader(token);
   if (!leader) return send(res, 403, page('リンクが使えません', '<div class="card"><h2>このリンクは使えません</h2><p>リンクが無効化されているか、再発行で変わっている可能性があります。本部に新しいリンクを確認してください。</p></div>'));
@@ -800,7 +850,7 @@ async function handleLeader(req, res, url, token) {
     return redirect(res, back(basePath, 'msg', '同意ありがとうございました。入力を始められます。'));
   }
   if (!leader.consentAt) {
-    if (req.method === 'POST' && url.pathname.endsWith('/add')) {
+    if (req.method === 'POST' && (url.pathname.endsWith('/add') || url.pathname.endsWith('/edit'))) {
       return redirect(res, back(basePath, 'err', '同意が完了してから入力してください。'));
     }
     return send(res, 200, page('同意のお願い', `${CONSENT_TEXT}
@@ -811,19 +861,18 @@ async function handleLeader(req, res, url, token) {
     const r = await addMember({ type: 'leader', leader }, Object.fromEntries(body0));
     // 枝フォーカス表示の図内フォームからの登録では、フォーカスも引き継いで同じ枝に戻る。
     // 実在し担当範囲内にある会員のときだけ引き継ぎ、それ以外は無視する（範囲は広げない）。
-    const fRaw3 = String(body0.get('focus') || '').trim();
-    let focusPart = '';
-    if (fRaw3 && store.members[fRaw3] && subtreeIds(leader.rootMemberId).has(fRaw3)) {
-      focusPart = `focus=${encodeURIComponent(fRaw3)}&`;
-    }
+    const focusPart = leaderFocusPart(leader, body0.get('focus'));
     // 組織図内のフォームからの登録では、見ていた表示段数（levels）を引き継いで戻る。
     // 2〜10の整数のときだけ引き継ぎ、それ以外は無視する（下のフォーム等は従来どおり）。
-    const lvRaw3 = String(body0.get('levels') || '').trim();
-    let lvPart = '';
-    if (/^\d+$/.test(lvRaw3)) {
-      const lv3 = parseInt(lvRaw3, 10);
-      if (lv3 >= 2 && lv3 <= CHART_MAX_DEPTH) lvPart = `levels=${lv3}&`;
-    }
+    const lvPart = leaderLevelsPart(body0.get('levels'));
+    const key = r.result === 'error' ? 'err' : 'msg';
+    return redirect(res, `${basePath}?${focusPart}${lvPart}${key}=${encodeURIComponent(r.message)}`);
+  }
+  if (req.method === 'POST' && url.pathname.endsWith('/edit')) {
+    const body0 = await readBody(req);
+    const r = await updateMemberByLeader(leader, Object.fromEntries(body0));
+    const focusPart = leaderFocusPart(leader, body0.get('focus'));
+    const lvPart = leaderLevelsPart(body0.get('levels'));
     const key = r.result === 'error' ? 'err' : 'msg';
     return redirect(res, `${basePath}?${focusPart}${lvPart}${key}=${encodeURIComponent(r.message)}`);
   }
@@ -919,6 +968,22 @@ async function handleLeader(req, res, url, token) {
     focusBanner = `<p class="crumbs">表示中の枝：${crumbs}</p>
   <p class="small">いまは <strong>${esc(fm.name)}</strong> さん（担当範囲全体では${levelOffset + 1}段目）の下の図を表示しています。先の段の会員の「＋ 下を増やす」を押せば、その枝をさらに下へたどれます。<a href="${basePath}">担当トップの図に戻る</a>（下のフォームから追加できる範囲は、担当範囲全体のままで変わりません）</p>`;
   }
+  // 会員情報の修正（?edit=<会員ID>）。実在し担当範囲内にある会員だけを対象にし、
+  // それ以外では修正カード自体を出さない。戻り先として現在の focus / levels を引き継ぐ。
+  const editParam = (url.searchParams.get('edit') || '').trim();
+  const editMember = editParam && store.members[editParam] && scope.has(editParam) ? store.members[editParam] : null;
+  let editCard = '';
+  if (editMember) {
+    editCard = `<div class="card" id="edit-form"><h3>会員情報を修正する</h3>
+  <p class="small">対象：${esc(editMember.name)}（${esc(editMember.memberId)}）</p>
+  <form method="post" action="${basePath}/edit">
+  <label>名前<input name="name" value="${esc(editMember.name)}" required maxlength="100"></label>
+  <label>登録日<input name="regDate" type="date" value="${esc(editMember.regDate || '')}"></label>
+  <input type="hidden" name="memberId" value="${esc(editMember.memberId)}">
+  ${focusId ? `<input type="hidden" name="focus" value="${esc(focusId)}">` : ''}
+  ${reqLevels != null ? `<input type="hidden" name="levels" value="${reqLevels}">` : ''}
+  <button type="submit">変更を保存</button> <a class="btn sub" href="${basePath}">キャンセル</a></form></div>`;
+  }
   const body = `${searchCard}<div class="card"><h2>${esc(leader.name)} さんの組織</h2>
   <p class="small">担当トップ：${esc(root ? root.name + '（' + root.memberId + '）' : leader.rootMemberId)} / ここから下だけが表示・入力できます。</p>
   <p class="small">空いている場所の枠に名前を入力して「登録」を押すと、その場所にそのまま登録できます（登録日には今日の日付が入っています。変える場合は日付を変更してください）。下のフォームから親と位置を選んで登録することもできます。</p>
@@ -927,6 +992,7 @@ async function handleLeader(req, res, url, token) {
   ${focusBanner}
   <div class="chart-bar"><span class="zlabel">表示する段数：</span><span class="zoombox"><a class="zbtn" href="${lvHref(lvMinus)}" aria-label="段数を減らす">−</a><span class="pct">${chart.levels}段</span><a class="zbtn" href="${lvHref(lvPlus)}" aria-label="段数を増やす">＋</a></span><span class="zlabel">図の大きさ：</span><span class="zoombox"><button type="button" id="zOut" aria-label="縮小">−</button><span class="pct" id="zPct">100%</span><button type="button" id="zIn" aria-label="拡大">＋</button><button type="button" id="zFit">等倍</button></span><span class="zlabel">横にスクロールできます</span></div>
   <div class="chart-wrap" id="chartWrap"><div class="chart-box" id="chartBox"><div class="chart-scale" id="chartScale">${chart.html}</div></div></div></div>
+  ${editCard}
   <div class="card"><h3>会員を追加する</h3>${presetNote}${addMemberForm(basePath + '/add', scope, preset)}</div>
   <script>(function(){var z=1;var scale=document.getElementById('chartScale');var box=document.getElementById('chartBox');var pct=document.getElementById('zPct');if(!scale||!box||!pct)return;function apply(){scale.style.transform='scale('+z+')';box.style.width=Math.ceil(scale.scrollWidth*z)+'px';box.style.height=Math.ceil(scale.scrollHeight*z)+'px';pct.textContent=Math.round(z*100)+'%';}document.getElementById('zIn').addEventListener('click',function(){z=Math.min(2,Math.round(z*1.25*100)/100);apply();});document.getElementById('zOut').addEventListener('click',function(){z=Math.max(0.1,Math.round(z/1.25*100)/100);apply();});document.getElementById('zFit').addEventListener('click',function(){z=1;apply();});apply();})();</script>`;
   return send(res, 200, page('リーダー画面', body, flashFrom(url)));
@@ -956,7 +1022,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/hq/leaders') return handleHqLeaders(req, res, url);
     if (p === '/hq/conflicts') return handleHqConflicts(req, res, url);
     if (p === '/hq/export.csv') return handleExportCsv(req, res);
-    const lm = p.match(/^\/leader\/([A-Za-z0-9_-]+)(\/(consent|add))?$/);
+    const lm = p.match(/^\/leader\/([A-Za-z0-9_-]+)(\/(consent|add|edit))?$/);
     if (lm) return handleLeader(req, res, url, lm[1]);
     return send(res, 404, page('見つかりません', '<div class="card"><h2>ページが見つかりません</h2></div>'));
   } catch (e) {
