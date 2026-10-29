@@ -544,8 +544,12 @@ function chartSlotForm(basePath, slot, today, levels, focusId) {
 // 先頭に開き直せるようにすることで、深い枝を何度でもたどれる（単独版 space-2 の
 // 「10段目以降は枝ごとに伸ばす」ハイブリッド方式と同じ考え方）。段ラベルは
 // levelOffset を加えて、担当範囲全体での実際の段数で表示する。
-function renderChartGrid(rootId, basePath, reqLevels, focusCtx) {
+// opts.viewOnly（本部のツリー表示用）: 見る専用モード。空き枠はフォームにせず
+// 薄い「空き」枠のままにし、会員の箱に修正リンクを付けない。フォーカス（下を増やす）
+// リンクは basePath に対して付くので、本部用は /hq/tree へのドリルダウンになる。
+function renderChartGrid(rootId, basePath, reqLevels, focusCtx, opts) {
   const today = todayJst();
+  const viewOnly = !!(opts && opts.viewOnly);
   const { byDepth, omitted, cutoff } = collectChartItems(rootId);
   const focusId = focusCtx ? focusCtx.focusId : null;
   const levelOffset = focusCtx ? focusCtx.levelOffset : 0;
@@ -576,7 +580,7 @@ function renderChartGrid(rootId, basePath, reqLevels, focusCtx) {
       // 祖先が登録できる空き枠の場合は、その枠へ移動できるリンクにする（枠自体では登録しない）。
       for (let pos = 0; pos < Math.pow(2, d); pos++) {
         const ancestor = floorByPos.get(pos >> (d - floorDepth));
-        const inner = ancestor && ancestor.type === 'slot'
+        const inner = !viewOnly && ancestor && ancestor.type === 'slot'
           ? `<a class="chart-empty" href="#${slotAnchorId(ancestor.parentId, ancestor.side)}">空き</a>`
           : `<div class="chart-empty">空き</div>`;
         cells += `<div class="chart-cell" style="${cellStyle(d, pos)}">${inner}</div>`;
@@ -587,10 +591,14 @@ function renderChartGrid(rootId, basePath, reqLevels, focusCtx) {
           const note = omitted.has(it.m.memberId) ? `<div class="small chart-note">（これより下は省略しています）</div>` : '';
           // 会員の箱から、その会員を対象にした修正フォームへ移動できるようにする。
           // いま見ている枝（focus）と、明示指定された表示段数（levels）があれば引き継ぐ。
-          let editHref = `${basePath}?edit=${encodeURIComponent(it.m.memberId)}`;
-          if (focusId) editHref += `&focus=${encodeURIComponent(focusId)}`;
-          if (reqLevels != null) editHref += `&levels=${reqLevels}`;
-          editHref += '#edit-form';
+          // 見る専用モード（本部）では修正リンクを付けない。
+          let editHref = '';
+          if (!viewOnly) {
+            editHref = `${basePath}?edit=${encodeURIComponent(it.m.memberId)}`;
+            if (focusId) editHref += `&focus=${encodeURIComponent(focusId)}`;
+            if (reqLevels != null) editHref += `&levels=${reqLevels}`;
+            editHref += '#edit-form';
+          }
           // 上限段の会員は、子がいる・いないに関わらず、その会員を先頭に開き直す
           // 「＋ 下を増やす」を出す（空き枠も上限より下にあるため）。明示指定された
           // 表示段数がある場合はリンクにも引き継ぐ。
@@ -598,6 +606,9 @@ function renderChartGrid(rootId, basePath, reqLevels, focusCtx) {
             ? `<a class="chart-drill" href="${basePath}?focus=${encodeURIComponent(it.m.memberId)}${reqLevels != null ? '&levels=' + reqLevels : ''}#chartWrap">＋ 下を増やす</a>`
             : '';
           cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}">${chartNodeHtml(it.m, editHref)}${note}${drill}</div>`;
+        } else if (viewOnly) {
+          // 見る専用モード（本部）では、親がいる空き場所も入力フォームにせず「空き」枠で見せる
+          cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}"><div class="chart-empty">空き</div></div>`;
         } else {
           cells += `<div class="chart-cell" id="${slotAnchorId(it.parentId, it.side)}" style="${cellStyle(d, it.pos)}">${chartSlotForm(basePath, it, today, displayLevels, focusId)}</div>`;
         }
@@ -636,7 +647,7 @@ function addMemberForm(action, scopeIds, preset) {
 
 // ---------- 本部 ----------
 function hqNav() {
-  return `<p class="nav"><a href="/hq">組織図（全体）</a><a href="/hq/members">会員一覧</a><a href="/hq/leaders">リーダー管理</a><a href="/hq/conflicts">要確認リスト</a><a href="/hq/export.csv">CSV書き出し</a></p>
+  return `<p class="nav"><a href="/hq">組織図（全体）</a><a href="/hq/tree">組織図（ツリー）</a><a href="/hq/members">会員一覧</a><a href="/hq/leaders">リーダー管理</a><a href="/hq/conflicts">要確認リスト</a><a href="/hq/export.csv">CSV書き出し</a></p>
   <form method="post" action="/logout" style="display:inline"><button class="sub" type="submit">ログアウト</button></form>`;
 }
 async function handleSetup(req, res, url) {
@@ -685,6 +696,65 @@ async function handleHq(req, res, url) {
   <ul class="tree">${renderTree(ROOT_ID)}</ul></div>
   <div class="card"><h3>会員を追加（本部）</h3>${addMemberForm('/hq/members/add', null)}</div>`;
   return send(res, 200, page('本部：組織図', body, flashFrom(url)));
+}
+// 本部の組織図（ツリー表示）。リーダー画面と同じ段グリッドの組織図を、会社を先頭に
+// 全体表示する見る専用ページ。空き枠は入力フォームにせず「空き」枠のまま見せ、
+// 会員の追加・修正は従来の画面（会員一覧・リーダー画面）で行う。
+// 深い組織のために、リーダー画面と同じ枝フォーカス（?focus=）が使える。
+async function handleHqTree(req, res, url) {
+  if (!isHq(req)) return redirect(res, '/login');
+  const basePath = '/hq/tree';
+  // 表示する段数（?levels=）。2〜10に丸め、データが必要な段数より少なくはならない（リーダー画面と同じ）。
+  let reqLevels = null;
+  const lvRaw = url.searchParams.get('levels');
+  if (lvRaw !== null && /^\d+$/.test(lvRaw.trim())) {
+    reqLevels = Math.min(CHART_MAX_DEPTH, Math.max(2, parseInt(lvRaw, 10)));
+  }
+  // 枝フォーカス（?focus=<会員ID>）: 実在する会員だけを有効とし、それ以外は全体表示に落とす。
+  // 会社自身の指定は全体表示と同じ。
+  let focusId = null;
+  const fParam = (url.searchParams.get('focus') || '').trim();
+  if (fParam && fParam !== ROOT_ID && store.members[fParam]) focusId = fParam;
+  let focusPath = null;
+  let levelOffset = 0;
+  if (focusId) {
+    focusPath = [];
+    let cur = store.members[focusId];
+    while (cur) {
+      focusPath.unshift(cur.memberId);
+      if (cur.memberId === ROOT_ID) break;
+      cur = cur.parentId ? store.members[cur.parentId] : null;
+    }
+    if (focusPath[0] !== ROOT_ID) { focusId = null; focusPath = null; }
+    else levelOffset = focusPath.length - 1;
+  }
+  const chartTopId = focusId || ROOT_ID;
+  const chart = renderChartGrid(chartTopId, basePath, reqLevels, focusId ? { focusId, levelOffset } : null, { viewOnly: true });
+  const lvMinus = Math.min(CHART_MAX_DEPTH, Math.max(2, chart.levels - 1));
+  const lvPlus = Math.min(CHART_MAX_DEPTH, Math.max(2, chart.levels + 1));
+  // 段数の－/＋リンクは、枝フォーカス表示ではフォーカスを引き継ぐ
+  const lvHref = (n) => focusId ? `${basePath}?focus=${encodeURIComponent(focusId)}&levels=${n}` : `${basePath}?levels=${n}`;
+  let focusBanner = '';
+  if (focusId) {
+    const fm = store.members[focusId];
+    const crumbs = focusPath.map((id, i) => {
+      const mm = store.members[id];
+      if (i === focusPath.length - 1) return `<strong>${esc(mm.name)}</strong>`;
+      if (i === 0) return `<a href="${basePath}">${esc(mm.name)}</a>`;
+      return `<a href="${basePath}?focus=${encodeURIComponent(id)}">${esc(mm.name)}</a>`;
+    }).join(' ＞ ');
+    focusBanner = `<p class="crumbs">表示中の枝：${crumbs}</p>
+  <p class="small">いまは <strong>${esc(fm.name)}</strong> さん（全体では${levelOffset + 1}段目）の下の図を表示しています。先の段の会員の「＋ 下を増やす」を押せば、その枝をさらに下へたどれます。<a href="${basePath}">全体の図に戻る</a></p>`;
+  }
+  const body = `${hqNav()}
+  <div class="card"><h2>組織図（ツリー表示・会社全体）</h2>
+  <p class="small">会社全体の組織図です。この画面は見る専用です（空き枠は入力できません）。会員の追加は「会員一覧」から、登録内容の修正はリーダー画面など従来の画面から行ってください。</p>
+  <p class="small">「表示する段数」の＋を押すと、まだ誰もいない先の段まで図を広げて見られます。図の一番下の段にいる会員の「＋ 下を増やす」を押すと、その人を先頭にして、さらに下の枝を見られます（何度でも繰り返せます）。</p>
+  ${focusBanner}
+  <div class="chart-bar"><span class="zlabel">表示する段数：</span><span class="zoombox"><a class="zbtn" href="${lvHref(lvMinus)}" aria-label="段数を減らす">−</a><span class="pct">${chart.levels}段</span><a class="zbtn" href="${lvHref(lvPlus)}" aria-label="段数を増やす">＋</a></span><span class="zlabel">図の大きさ：</span><span class="zoombox"><button type="button" id="zOut" aria-label="縮小">−</button><span class="pct" id="zPct">100%</span><button type="button" id="zIn" aria-label="拡大">＋</button><button type="button" id="zFit">等倍</button></span><span class="zlabel">横にスクロールできます</span></div>
+  <div class="chart-wrap" id="chartWrap"><div class="chart-box" id="chartBox"><div class="chart-scale" id="chartScale">${chart.html}</div></div></div></div>
+  <script>(function(){var z=1;var scale=document.getElementById('chartScale');var box=document.getElementById('chartBox');var pct=document.getElementById('zPct');if(!scale||!box||!pct)return;function apply(){scale.style.transform='scale('+z+')';box.style.width=Math.ceil(scale.scrollWidth*z)+'px';box.style.height=Math.ceil(scale.scrollHeight*z)+'px';pct.textContent=Math.round(z*100)+'%';}document.getElementById('zIn').addEventListener('click',function(){z=Math.min(2,Math.round(z*1.25*100)/100);apply();});document.getElementById('zOut').addEventListener('click',function(){z=Math.max(0.1,Math.round(z/1.25*100)/100);apply();});document.getElementById('zFit').addEventListener('click',function(){z=1;apply();});apply();})();</script>`;
+  return send(res, 200, page('本部：組織図（ツリー）', body, flashFrom(url)));
 }
 async function handleHqMembers(req, res, url) {
   if (!isHq(req)) return redirect(res, '/login');
@@ -1018,6 +1088,7 @@ const server = http.createServer(async (req, res) => {
       return redirect(res, '/login', 'sid=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0');
     }
     if (p === '/hq') return handleHq(req, res, url);
+    if (p === '/hq/tree') return handleHqTree(req, res, url);
     if (p === '/hq/members' || p === '/hq/members/add') return handleHqMembers(req, res, url);
     if (p === '/hq/leaders') return handleHqLeaders(req, res, url);
     if (p === '/hq/conflicts') return handleHqConflicts(req, res, url);
