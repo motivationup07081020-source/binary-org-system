@@ -442,6 +442,8 @@ a.chart-empty:hover{border-color:#94a3b8;color:#64748b;background:#f1f5f9}
 .chart-drill:hover{background:#dcfce7}
 .chart-edit{display:inline-block;margin-top:4px;color:#14532d;font-size:12px;font-weight:600}
 .chart-edit:hover{color:#166534;text-decoration-thickness:2px}
+.chart-focus-link{display:inline-block;margin-top:4px;color:#1d4ed8;font-size:12px;font-weight:600}
+.chart-focus-link:hover{color:#1e40af;text-decoration-thickness:2px}
 .crumbs{font-size:13.5px;margin:8px 0}.crumbs a{color:#14532d;font-weight:600}
 </style></head><body><header><strong>会員一括管理システム</strong></header><main>${flashHtml}${errHtml}${body}</main></body></html>`;
 }
@@ -513,11 +515,12 @@ function collectChartItems(rootId) {
   })(rootId, 0, 0);
   return { byDepth, omitted, cutoff };
 }
-function chartNodeHtml(m, editHref) {
+function chartNodeHtml(m, editHref, focusHref) {
   if (m.root) return `<div class="chart-node chart-root">${esc(m.name)}</div>`;
   const c = countsFor(m.memberId);
   const editLink = editHref ? `<br><a class="chart-edit" href="${editHref}">名前を修正</a>` : '';
-  return `<div class="chart-node"><strong>${esc(m.name)}</strong><br><span class="small">ID:${esc(m.memberId)}<br>登録:${esc(m.regDate || '-')}<br>左${c.left}・右${c.right}</span>${editLink}</div>`;
+  const focusLink = focusHref ? `<br><a class="chart-focus-link" href="${focusHref}">この人から下を見る</a>` : '';
+  return `<div class="chart-node"><strong>${esc(m.name)}</strong><br><span class="small">ID:${esc(m.memberId)}<br>登録:${esc(m.regDate || '-')}<br>左${c.left}・右${c.right}</span>${editLink}${focusLink}</div>`;
 }
 // 空き枠セルのアンカーID。HTML id として安全な文字だけを使い、それ以外は '-' に置き換える。
 function slotAnchorId(parentId, side) {
@@ -545,8 +548,10 @@ function chartSlotForm(basePath, slot, today, levels, focusId) {
 // 「10段目以降は枝ごとに伸ばす」ハイブリッド方式と同じ考え方）。段ラベルは
 // levelOffset を加えて、担当範囲全体での実際の段数で表示する。
 // opts.viewOnly（本部のツリー表示用）: 見る専用モード。空き枠はフォームにせず
-// 薄い「空き」枠のままにし、会員の箱に修正リンクを付けない。フォーカス（下を増やす）
-// リンクは basePath に対して付くので、本部用は /hq/tree へのドリルダウンになる。
+// 薄い「空き」枠のままにし、会員の箱に修正リンクを付けない。その代わり、会社以外の
+// 全会員の箱に、その会員を先頭に開く「この人から下を見る」リンクを付ける。
+// フォーカス（下を増やす）リンクは basePath に対して付くので、本部用は /hq/tree への
+// ドリルダウンになる。
 function renderChartGrid(rootId, basePath, reqLevels, focusCtx, opts) {
   const today = todayJst();
   const viewOnly = !!(opts && opts.viewOnly);
@@ -605,7 +610,12 @@ function renderChartGrid(rootId, basePath, reqLevels, focusCtx, opts) {
           const drill = cutoff.has(it.m.memberId)
             ? `<a class="chart-drill" href="${basePath}?focus=${encodeURIComponent(it.m.memberId)}${reqLevels != null ? '&levels=' + reqLevels : ''}#chartWrap">＋ 下を増やす</a>`
             : '';
-          cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}">${chartNodeHtml(it.m, editHref)}${note}${drill}</div>`;
+          // 見る専用モード（本部）では、会社以外の全会員の箱から、その会員を先頭にした
+          // 図へ直接移動できるリンクを付ける（リーダー画面には付けない）。
+          const focusHref = viewOnly && !it.m.root
+            ? `${basePath}?focus=${encodeURIComponent(it.m.memberId)}#chartWrap`
+            : '';
+          cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}">${chartNodeHtml(it.m, editHref, focusHref)}${note}${drill}</div>`;
         } else if (viewOnly) {
           // 見る専用モード（本部）では、親がいる空き場所も入力フォームにせず「空き」枠で見せる
           cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}"><div class="chart-empty">空き</div></div>`;
@@ -749,7 +759,7 @@ async function handleHqTree(req, res, url) {
   const body = `${hqNav()}
   <div class="card"><h2>組織図（ツリー表示・会社全体）</h2>
   <p class="small">会社全体の組織図です。この画面は見る専用です（空き枠は入力できません）。会員の追加は「会員一覧」から、登録内容の修正はリーダー画面など従来の画面から行ってください。</p>
-  <p class="small">「表示する段数」の＋を押すと、まだ誰もいない先の段まで図を広げて見られます。図の一番下の段にいる会員の「＋ 下を増やす」を押すと、その人を先頭にして、さらに下の枝を見られます（何度でも繰り返せます）。</p>
+  <p class="small">「表示する段数」の＋を押すと、まだ誰もいない先の段まで図を広げて見られます。各会員の「この人から下を見る」を押すと、その人を先頭にした図へ移動できます。図の一番下の段にいる会員の「＋ 下を増やす」を押すと、その人を先頭にして、さらに下の枝を見られます（何度でも繰り返せます）。</p>
   ${focusBanner}
   <div class="chart-bar"><span class="zlabel">表示する段数：</span><span class="zoombox"><a class="zbtn" href="${lvHref(lvMinus)}" aria-label="段数を減らす">−</a><span class="pct">${chart.levels}段</span><a class="zbtn" href="${lvHref(lvPlus)}" aria-label="段数を増やす">＋</a></span><span class="zlabel">図の大きさ：</span><span class="zoombox"><button type="button" id="zOut" aria-label="縮小">−</button><span class="pct" id="zPct">100%</span><button type="button" id="zIn" aria-label="拡大">＋</button><button type="button" id="zFit">等倍</button></span><span class="zlabel">横にスクロールできます</span></div>
   <div class="chart-wrap" id="chartWrap"><div class="chart-box" id="chartBox"><div class="chart-scale" id="chartScale">${chart.html}</div></div></div></div>
@@ -764,17 +774,19 @@ async function handleHqMembers(req, res, url) {
     return redirect(res, back('/hq/members', r.result === 'error' ? 'err' : 'msg', r.message));
   }
   const q = (url.searchParams.get('q') || '').trim().toLowerCase();
-  let list = Object.values(store.members).filter(m => !m.root);
+  let list = Object.values(store.members);
   if (q) list = list.filter(m => m.name.toLowerCase().includes(q) || m.memberId.toLowerCase().includes(q));
-  list.sort((a, b) => a.memberId.localeCompare(b.memberId));
+  list.sort((a, b) => (a.root ? 0 : 1) - (b.root ? 0 : 1) || a.memberId.localeCompare(b.memberId));
+  const memberCount = list.filter(m => !m.root).length;
   const rows = list.map(m => {
     const c = countsFor(m.memberId);
     const parent = m.parentId ? store.members[m.parentId] : null;
-    return `<tr><td>${esc(m.memberId)}</td><td>${esc(m.name)}</td><td>${esc(m.regDate || '')}</td><td>${esc(parent ? parent.name + '（' + parent.memberId + '）' : '')}</td><td>${m.side === 'L' ? '左' : m.side === 'R' ? '右' : ''}</td><td>${c.left}</td><td>${c.right}</td><td>${esc(m.enteredBy || '')}</td></tr>`;
+    const treeHref = m.root ? '/hq/tree' : `/hq/tree?focus=${encodeURIComponent(m.memberId)}`;
+    return `<tr><td>${esc(m.memberId)}</td><td>${esc(m.name)}</td><td>${esc(m.regDate || '')}</td><td>${esc(parent ? parent.name + '（' + parent.memberId + '）' : '')}</td><td>${m.side === 'L' ? '左' : m.side === 'R' ? '右' : ''}</td><td>${c.left}</td><td>${c.right}</td><td>${esc(m.enteredBy || '')}</td><td><a href="${treeHref}">ツリーで見る</a></td></tr>`;
   }).join('');
-  const body = `${hqNav()}<div class="card"><h2>会員一覧（${list.length}件）</h2>
+  const body = `${hqNav()}<div class="card"><h2>会員一覧（${memberCount}件）</h2>
   <form method="get" action="/hq/members"><input name="q" value="${esc(q)}" placeholder="名前・会員IDで検索"><button type="submit">検索</button></form>
-  <table><tr><th>会員ID</th><th>名前</th><th>登録日</th><th>親</th><th>位置</th><th>左人数</th><th>右人数</th><th>入力者</th></tr>${rows || '<tr><td colspan="8">該当なし</td></tr>'}</table></div>
+  <table><tr><th>会員ID</th><th>名前</th><th>登録日</th><th>親</th><th>位置</th><th>左人数</th><th>右人数</th><th>入力者</th><th>ツリー</th></tr>${rows || '<tr><td colspan="9">該当なし</td></tr>'}</table></div>
   <div class="card"><h3>会員を追加（本部）</h3>${addMemberForm('/hq/members/add', null)}</div>`;
   return send(res, 200, page('本部：会員一覧', body, flashFrom(url)));
 }
