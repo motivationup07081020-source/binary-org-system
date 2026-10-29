@@ -199,6 +199,27 @@ function subtreeIds(rootId) {
   }
   return out;
 }
+// ルートから配下を幅優先で辿り、会員ごとの「ルートからの深さ（段-1）」を返す。
+// リーダー画面の会員検索で、その人の段を表示するために使う。
+function scopeDepthMap(rootId) {
+  const map = childrenMap();
+  const out = new Map();
+  const queue = [rootId];
+  out.set(rootId, 0);
+  for (let i = 0; i < queue.length; i++) {
+    const id = queue[i];
+    const ch = map.get(id);
+    if (!ch) continue;
+    for (const side of ['L', 'R']) {
+      const child = ch[side];
+      if (child && !out.has(child.memberId)) {
+        out.set(child.memberId, out.get(id) + 1);
+        queue.push(child.memberId);
+      }
+    }
+  }
+  return out;
+}
 function countsFor(memberId) {
   const map = childrenMap();
   const ch = map.get(memberId) || { L: null, R: null };
@@ -382,6 +403,14 @@ form.chart-slot{margin:0;text-align:left}
 .chart-slot input{padding:4px 6px;font-size:13px;margin:2px 0;border-radius:5px}
 .chart-slot button{width:100%;padding:5px 0;font-size:13px;margin-top:2px}
 .chart-empty{border:1.5px dashed #dde3ea;color:#b9c2cf;background:#fbfcfd;border-radius:8px;padding:7px 10px;width:132px;text-align:center;box-sizing:border-box;font-size:13px}
+a.chart-empty{text-decoration:none;cursor:pointer}
+a.chart-empty:hover{border-color:#94a3b8;color:#64748b;background:#f1f5f9}
+.chart-cell:target{scroll-margin-top:16px}
+.chart-cell:target .chart-slot{outline:3px solid #f59e0b;outline-offset:2px;background:#fef3c7;box-shadow:0 0 0 4px rgba(245,158,11,.25)}
+.search-form{display:flex;gap:8px;align-items:flex-start}
+.search-form input{flex:1;width:auto}
+.search-result{display:block;border:1px solid #bbf7d0;background:#f0fdf4;border-radius:8px;padding:9px 11px;margin:6px 0;color:#14532d;text-decoration:none}
+.search-result:hover{background:#dcfce7}
 .chart-note{margin-top:4px}
 .chart-drill{display:inline-block;margin-top:5px;background:#fff;color:#14532d;border:1.5px solid #14532d;border-radius:6px;padding:4px 10px;font-size:12.5px;font-weight:700;text-decoration:none}
 .chart-drill:hover{background:#dcfce7}
@@ -461,6 +490,10 @@ function chartNodeHtml(m) {
   const c = countsFor(m.memberId);
   return `<div class="chart-node"><strong>${esc(m.name)}</strong><br><span class="small">ID:${esc(m.memberId)}<br>登録:${esc(m.regDate || '-')}<br>左${c.left}・右${c.right}</span></div>`;
 }
+// 空き枠セルのアンカーID。HTML id として安全な文字だけを使い、それ以外は '-' に置き換える。
+function slotAnchorId(parentId, side) {
+  return 'slot-' + String(parentId).replace(/[^A-Za-z0-9_-]/g, '-') + '-' + side;
+}
 // 空き枠の中に置く、その場で登録できる小さなフォーム。
 // 登録後の戻り先で表示段数を維持するため、現在の表示段数（levels）も隠しフィールドで送る。
 // 枝フォーカス表示のときは focus も隠しフィールドで送り、登録後も同じ枝に戻れるようにする
@@ -502,14 +535,22 @@ function renderChartGrid(rootId, basePath, reqLevels, focusCtx) {
     return `grid-column:${pos * span + 1} / span ${span}`;
   };
   const connCell = (depth, pos) => `<div class="cn" style="${cellStyle(depth, pos)}"><i class="p"></i><i class="h"></i><i class="l"></i><i class="r"></i></div>`;
+  // データのある最下段（floorDepth）の位置→アイテム対応表。データより先の段の「空き」枠は、
+  // 自分の祖先にあたるこの段の位置を見て、登録できる空き枠（slot）ならその枠へのリンクにする。
+  const floorByPos = new Map((byDepth.get(floorDepth) || []).map(it => [it.pos, it]));
   let html = '';
   for (let d = 0; d <= maxDepth; d++) {
     const items = (byDepth.get(d) || []).slice().sort((a, b) => a.pos - b.pos);
     let cells = '';
     if (d > floorDepth) {
-      // データより先の段は、全位置を薄い「空き」枠で埋めて1枚の図として見せる（追加ボタンにはしない）
+      // データより先の段は、全位置を薄い「空き」枠で埋めて1枚の図として見せる（追加ボタンにはしない）。
+      // 祖先が登録できる空き枠の場合は、その枠へ移動できるリンクにする（枠自体では登録しない）。
       for (let pos = 0; pos < Math.pow(2, d); pos++) {
-        cells += `<div class="chart-cell" style="${cellStyle(d, pos)}"><div class="chart-empty">空き</div></div>`;
+        const ancestor = floorByPos.get(pos >> (d - floorDepth));
+        const inner = ancestor && ancestor.type === 'slot'
+          ? `<a class="chart-empty" href="#${slotAnchorId(ancestor.parentId, ancestor.side)}">空き</a>`
+          : `<div class="chart-empty">空き</div>`;
+        cells += `<div class="chart-cell" style="${cellStyle(d, pos)}">${inner}</div>`;
       }
     } else {
       for (const it of items) {
@@ -523,7 +564,7 @@ function renderChartGrid(rootId, basePath, reqLevels, focusCtx) {
             : '';
           cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}">${chartNodeHtml(it.m)}${note}${drill}</div>`;
         } else {
-          cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}">${chartSlotForm(basePath, it, today, displayLevels, focusId)}</div>`;
+          cells += `<div class="chart-cell" id="${slotAnchorId(it.parentId, it.side)}" style="${cellStyle(d, it.pos)}">${chartSlotForm(basePath, it, today, displayLevels, focusId)}</div>`;
         }
       }
     }
@@ -788,6 +829,41 @@ async function handleLeader(req, res, url, token) {
   }
   const scope = subtreeIds(leader.rootMemberId);
   const root = store.members[leader.rootMemberId];
+  // 会員検索（?q=）。フォーカス表示の有無に関わらず、担当範囲（担当トップ以下）全体から
+  // 名前の部分一致（大文字小文字は区別しない）と会員IDの部分一致で探す。範囲外は出さない。
+  const searchQuery = (url.searchParams.get('q') || '').trim();
+  let searchResultsHtml = '';
+  if (searchQuery) {
+    const needle = searchQuery.toLowerCase();
+    const depthMap = scopeDepthMap(leader.rootMemberId);
+    const matches = [];
+    for (const id of depthMap.keys()) {
+      const m = store.members[id];
+      if (!m) continue;
+      if (m.name.toLowerCase().includes(needle) || m.memberId.toLowerCase().includes(needle)) matches.push(m);
+    }
+    if (!matches.length) {
+      searchResultsHtml = '<p>見つかりませんでした</p>';
+    } else {
+      const shown = matches.slice(0, 50);
+      const items = shown.map(m => {
+        const depth = (depthMap.get(m.memberId) || 0) + 1;
+        const parent = m.memberId === leader.rootMemberId
+          ? '担当トップ'
+          : (m.parentId && store.members[m.parentId] ? store.members[m.parentId].name : '');
+        const href = m.memberId === leader.rootMemberId
+          ? basePath
+          : `${basePath}?focus=${encodeURIComponent(m.memberId)}#chartWrap`;
+        return `<a class="search-result" href="${href}"><strong>${esc(m.name)}</strong> <span class="small">ID:${esc(m.memberId)} / 登録:${esc(m.regDate || '-')} / ${depth}段目 / 親：${esc(parent)}</span></a>`;
+      }).join('');
+      const note = matches.length > shown.length
+        ? `<p class="small">${matches.length}件中、最初の${shown.length}件まで表示しています。</p>`
+        : `<p class="small">${matches.length}件見つかりました。</p>`;
+      searchResultsHtml = `${note}${items}`;
+    }
+  }
+  const searchCard = `<div class="card"><h3>会員を検索</h3>
+  <form class="search-form" method="get" action="${basePath}"><input name="q" value="${esc(searchQuery)}" placeholder="名前・会員IDで検索"><button type="submit">検索</button></form>${searchResultsHtml}</div>`;
   // 組織図の空き枠から来たプリセット（?parentId=&side=）。担当範囲内の親だけを受け付ける。
   let preset = null;
   const pParam = url.searchParams.get('parentId');
@@ -843,10 +919,10 @@ async function handleLeader(req, res, url, token) {
     focusBanner = `<p class="crumbs">表示中の枝：${crumbs}</p>
   <p class="small">いまは <strong>${esc(fm.name)}</strong> さん（担当範囲全体では${levelOffset + 1}段目）の下の図を表示しています。先の段の会員の「＋ 下を増やす」を押せば、その枝をさらに下へたどれます。<a href="${basePath}">担当トップの図に戻る</a>（下のフォームから追加できる範囲は、担当範囲全体のままで変わりません）</p>`;
   }
-  const body = `<div class="card"><h2>${esc(leader.name)} さんの組織</h2>
+  const body = `${searchCard}<div class="card"><h2>${esc(leader.name)} さんの組織</h2>
   <p class="small">担当トップ：${esc(root ? root.name + '（' + root.memberId + '）' : leader.rootMemberId)} / ここから下だけが表示・入力できます。</p>
   <p class="small">空いている場所の枠に名前を入力して「登録」を押すと、その場所にそのまま登録できます（登録日には今日の日付が入っています。変える場合は日付を変更してください）。下のフォームから親と位置を選んで登録することもできます。</p>
-  <p class="small">「表示する段数」の＋を押すと、まだ誰もいない先の段まで図を広げて見られます。</p>
+  <p class="small">「表示する段数」の＋を押すと、まだ誰もいない先の段まで図を広げて見られます。先の段の「空き」を押すと、その枝の登録できる空き枠へ移動します。</p>
   <p class="small">図の一番下の段にいる会員の「＋ 下を増やす」を押すと、その人を先頭にして、さらに下の枝を見たり入力したりできます（何度でも繰り返せます）。</p>
   ${focusBanner}
   <div class="chart-bar"><span class="zlabel">表示する段数：</span><span class="zoombox"><a class="zbtn" href="${lvHref(lvMinus)}" aria-label="段数を減らす">−</a><span class="pct">${chart.levels}段</span><a class="zbtn" href="${lvHref(lvPlus)}" aria-label="段数を増やす">＋</a></span><span class="zlabel">図の大きさ：</span><span class="zoombox"><button type="button" id="zOut" aria-label="縮小">−</button><span class="pct" id="zPct">100%</span><button type="button" id="zIn" aria-label="拡大">＋</button><button type="button" id="zFit">等倍</button></span><span class="zlabel">横にスクロールできます</span></div>
