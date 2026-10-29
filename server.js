@@ -383,6 +383,9 @@ form.chart-slot{margin:0;text-align:left}
 .chart-slot button{width:100%;padding:5px 0;font-size:13px;margin-top:2px}
 .chart-empty{border:1.5px dashed #dde3ea;color:#b9c2cf;background:#fbfcfd;border-radius:8px;padding:7px 10px;width:132px;text-align:center;box-sizing:border-box;font-size:13px}
 .chart-note{margin-top:4px}
+.chart-drill{display:inline-block;margin-top:5px;background:#fff;color:#14532d;border:1.5px solid #14532d;border-radius:6px;padding:4px 10px;font-size:12.5px;font-weight:700;text-decoration:none}
+.chart-drill:hover{background:#dcfce7}
+.crumbs{font-size:13.5px;margin:8px 0}.crumbs a{color:#14532d;font-weight:600}
 </style></head><body><header><strong>会員一括管理システム</strong></header><main>${flashHtml}${errHtml}${body}</main></body></html>`;
 }
 function flashFrom(url) {
@@ -431,6 +434,7 @@ function collectChartItems(rootId) {
   const map = childrenMap();
   const byDepth = new Map(); // depth -> [{type:'member'|'slot', pos, m?, parentId?, side?}]
   const omitted = new Set(); // 上限段で子がいる会員（省略注記を付ける）
+  const cutoff = new Set(); // 上限段にいる会員全員（子がいてもいなくても「＋ 下を増やす」の対象）
   const push = (depth, item) => {
     if (!byDepth.has(depth)) byDepth.set(depth, []);
     byDepth.get(depth).push(item);
@@ -441,6 +445,7 @@ function collectChartItems(rootId) {
     push(depth, { type: 'member', pos, m });
     const ch = map.get(id) || { L: null, R: null };
     if (depth >= CHART_MAX_DEPTH) {
+      cutoff.add(id);
       if (ch.L || ch.R) omitted.add(id);
       return;
     }
@@ -449,7 +454,7 @@ function collectChartItems(rootId) {
     if (ch.R) walk(ch.R.memberId, depth + 1, pos * 2 + 1);
     else push(depth + 1, { type: 'slot', pos: pos * 2 + 1, parentId: id, side: 'R' });
   })(rootId, 0, 0);
-  return { byDepth, omitted };
+  return { byDepth, omitted, cutoff };
 }
 function chartNodeHtml(m) {
   if (m.root) return `<div class="chart-node chart-root">${esc(m.name)}</div>`;
@@ -458,7 +463,9 @@ function chartNodeHtml(m) {
 }
 // 空き枠の中に置く、その場で登録できる小さなフォーム。
 // 登録後の戻り先で表示段数を維持するため、現在の表示段数（levels）も隠しフィールドで送る。
-function chartSlotForm(basePath, slot, today, levels) {
+// 枝フォーカス表示のときは focus も隠しフィールドで送り、登録後も同じ枝に戻れるようにする
+// （フォーカス表示でないときは focus フィールド自体を出さない＝従来のマークアップのまま）。
+function chartSlotForm(basePath, slot, today, levels, focusId) {
   const sideLabel = slot.side === 'L' ? '左' : '右';
   return `<form class="chart-slot" method="post" action="${basePath}/add"><div class="slot-title">＋ ${sideLabel}に追加</div>`
     + `<input type="text" name="name" placeholder="名前" maxlength="100">`
@@ -466,11 +473,20 @@ function chartSlotForm(basePath, slot, today, levels) {
     + `<input type="hidden" name="parentId" value="${esc(slot.parentId)}">`
     + `<input type="hidden" name="side" value="${slot.side}">`
     + `<input type="hidden" name="levels" value="${levels}">`
+    + (focusId ? `<input type="hidden" name="focus" value="${esc(focusId)}">` : '')
     + `<button type="submit">登録</button></form>`;
 }
-function renderChartGrid(rootId, basePath, reqLevels) {
+// focusCtx: null（担当トップを先頭に表示）か {focusId, levelOffset}（枝フォーカス表示）。
+// 枝フォーカス表示では、指定会員を図の先頭にして、そこから先を新たに CHART_MAX_DEPTH 段
+// まで描く。上限段の会員には「＋ 下を増やす」リンク（?focus=<会員ID>）を付け、その会員を
+// 先頭に開き直せるようにすることで、深い枝を何度でもたどれる（単独版 space-2 の
+// 「10段目以降は枝ごとに伸ばす」ハイブリッド方式と同じ考え方）。段ラベルは
+// levelOffset を加えて、担当範囲全体での実際の段数で表示する。
+function renderChartGrid(rootId, basePath, reqLevels, focusCtx) {
   const today = todayJst();
-  const { byDepth, omitted } = collectChartItems(rootId);
+  const { byDepth, omitted, cutoff } = collectChartItems(rootId);
+  const focusId = focusCtx ? focusCtx.focusId : null;
+  const levelOffset = focusCtx ? focusCtx.levelOffset : 0;
   const depths = [...byDepth.keys()].sort((a, b) => a - b);
   const floorDepth = depths.length ? depths[depths.length - 1] : 0;
   const floorLevels = floorDepth + 1;
@@ -499,13 +515,19 @@ function renderChartGrid(rootId, basePath, reqLevels) {
       for (const it of items) {
         if (it.type === 'member') {
           const note = omitted.has(it.m.memberId) ? `<div class="small chart-note">（これより下は省略しています）</div>` : '';
-          cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}">${chartNodeHtml(it.m)}${note}</div>`;
+          // 上限段の会員は、子がいる・いないに関わらず、その会員を先頭に開き直す
+          // 「＋ 下を増やす」を出す（空き枠も上限より下にあるため）。明示指定された
+          // 表示段数がある場合はリンクにも引き継ぐ。
+          const drill = cutoff.has(it.m.memberId)
+            ? `<a class="chart-drill" href="${basePath}?focus=${encodeURIComponent(it.m.memberId)}${reqLevels != null ? '&levels=' + reqLevels : ''}#chartWrap">＋ 下を増やす</a>`
+            : '';
+          cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}">${chartNodeHtml(it.m)}${note}${drill}</div>`;
         } else {
-          cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}">${chartSlotForm(basePath, it, today, displayLevels)}</div>`;
+          cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}">${chartSlotForm(basePath, it, today, displayLevels, focusId)}</div>`;
         }
       }
     }
-    html += `<div class="chart-level"><div class="chart-lvl">${d + 1}段目</div><div class="chart-row" style="${gridStyle}">${cells}</div></div>`;
+    html += `<div class="chart-level"><div class="chart-lvl">${d + 1 + levelOffset}段目</div><div class="chart-row" style="${gridStyle}">${cells}</div></div>`;
     if (d < maxDepth) {
       let conns = '';
       if (maxDepth > floorDepth && d >= floorDepth) {
@@ -746,6 +768,13 @@ async function handleLeader(req, res, url, token) {
   if (req.method === 'POST' && url.pathname.endsWith('/add')) {
     const body0 = await readBody(req);
     const r = await addMember({ type: 'leader', leader }, Object.fromEntries(body0));
+    // 枝フォーカス表示の図内フォームからの登録では、フォーカスも引き継いで同じ枝に戻る。
+    // 実在し担当範囲内にある会員のときだけ引き継ぎ、それ以外は無視する（範囲は広げない）。
+    const fRaw3 = String(body0.get('focus') || '').trim();
+    let focusPart = '';
+    if (fRaw3 && store.members[fRaw3] && subtreeIds(leader.rootMemberId).has(fRaw3)) {
+      focusPart = `focus=${encodeURIComponent(fRaw3)}&`;
+    }
     // 組織図内のフォームからの登録では、見ていた表示段数（levels）を引き継いで戻る。
     // 2〜10の整数のときだけ引き継ぎ、それ以外は無視する（下のフォーム等は従来どおり）。
     const lvRaw3 = String(body0.get('levels') || '').trim();
@@ -755,7 +784,7 @@ async function handleLeader(req, res, url, token) {
       if (lv3 >= 2 && lv3 <= CHART_MAX_DEPTH) lvPart = `levels=${lv3}&`;
     }
     const key = r.result === 'error' ? 'err' : 'msg';
-    return redirect(res, `${basePath}?${lvPart}${key}=${encodeURIComponent(r.message)}`);
+    return redirect(res, `${basePath}?${focusPart}${lvPart}${key}=${encodeURIComponent(r.message)}`);
   }
   const scope = subtreeIds(leader.rootMemberId);
   const root = store.members[leader.rootMemberId];
@@ -776,14 +805,51 @@ async function handleLeader(req, res, url, token) {
   if (lvRaw !== null && /^\d+$/.test(lvRaw.trim())) {
     reqLevels = Math.min(CHART_MAX_DEPTH, Math.max(2, parseInt(lvRaw, 10)));
   }
-  const chart = renderChartGrid(leader.rootMemberId, basePath, reqLevels);
+  // 枝フォーカス（?focus=<会員ID>）: その会員を図の先頭にして、その枝だけを深く見る表示。
+  // 実在し担当範囲内にある会員だけを有効とし、それ以外（範囲外・存在しないID）は
+  // 担当トップ表示に落とす（範囲外の情報は一切出さない）。担当トップ自身の指定は通常表示と同じ。
+  let focusId = null;
+  const fParam = (url.searchParams.get('focus') || '').trim();
+  if (fParam && fParam !== leader.rootMemberId && store.members[fParam] && scope.has(fParam)) focusId = fParam;
+  const chartTopId = focusId || leader.rootMemberId;
+  // 担当トップからフォーカス会員までの経路（パンくず用）と、全体での段数オフセットを求める
+  let focusPath = null;
+  let levelOffset = 0;
+  if (focusId) {
+    focusPath = [];
+    let cur = store.members[focusId];
+    while (cur) {
+      focusPath.unshift(cur.memberId);
+      if (cur.memberId === leader.rootMemberId) break;
+      cur = cur.parentId ? store.members[cur.parentId] : null;
+    }
+    if (focusPath[0] !== leader.rootMemberId) { focusId = null; focusPath = null; }
+    else levelOffset = focusPath.length - 1;
+  }
+  const chart = renderChartGrid(chartTopId, basePath, reqLevels, focusId ? { focusId, levelOffset } : null);
   const lvMinus = Math.min(CHART_MAX_DEPTH, Math.max(2, chart.levels - 1));
   const lvPlus = Math.min(CHART_MAX_DEPTH, Math.max(2, chart.levels + 1));
+  // 段数の－/＋リンクは、枝フォーカス表示ではフォーカスを引き継ぐ
+  const lvHref = (n) => focusId ? `${basePath}?focus=${encodeURIComponent(focusId)}&levels=${n}` : `${basePath}?levels=${n}`;
+  let focusBanner = '';
+  if (focusId) {
+    const fm = store.members[focusId];
+    const crumbs = focusPath.map((id, i) => {
+      const mm = store.members[id];
+      if (i === focusPath.length - 1) return `<strong>${esc(mm.name)}</strong>`;
+      if (i === 0) return `<a href="${basePath}">${esc(mm.name)}</a>`;
+      return `<a href="${basePath}?focus=${encodeURIComponent(id)}">${esc(mm.name)}</a>`;
+    }).join(' ＞ ');
+    focusBanner = `<p class="crumbs">表示中の枝：${crumbs}</p>
+  <p class="small">いまは <strong>${esc(fm.name)}</strong> さん（担当範囲全体では${levelOffset + 1}段目）の下の図を表示しています。先の段の会員の「＋ 下を増やす」を押せば、その枝をさらに下へたどれます。<a href="${basePath}">担当トップの図に戻る</a>（下のフォームから追加できる範囲は、担当範囲全体のままで変わりません）</p>`;
+  }
   const body = `<div class="card"><h2>${esc(leader.name)} さんの組織</h2>
   <p class="small">担当トップ：${esc(root ? root.name + '（' + root.memberId + '）' : leader.rootMemberId)} / ここから下だけが表示・入力できます。</p>
   <p class="small">空いている場所の枠に名前を入力して「登録」を押すと、その場所にそのまま登録できます（登録日には今日の日付が入っています。変える場合は日付を変更してください）。下のフォームから親と位置を選んで登録することもできます。</p>
   <p class="small">「表示する段数」の＋を押すと、まだ誰もいない先の段まで図を広げて見られます。</p>
-  <div class="chart-bar"><span class="zlabel">表示する段数：</span><span class="zoombox"><a class="zbtn" href="${basePath}?levels=${lvMinus}" aria-label="段数を減らす">−</a><span class="pct">${chart.levels}段</span><a class="zbtn" href="${basePath}?levels=${lvPlus}" aria-label="段数を増やす">＋</a></span><span class="zlabel">図の大きさ：</span><span class="zoombox"><button type="button" id="zOut" aria-label="縮小">−</button><span class="pct" id="zPct">100%</span><button type="button" id="zIn" aria-label="拡大">＋</button><button type="button" id="zFit">等倍</button></span><span class="zlabel">横にスクロールできます</span></div>
+  <p class="small">図の一番下の段にいる会員の「＋ 下を増やす」を押すと、その人を先頭にして、さらに下の枝を見たり入力したりできます（何度でも繰り返せます）。</p>
+  ${focusBanner}
+  <div class="chart-bar"><span class="zlabel">表示する段数：</span><span class="zoombox"><a class="zbtn" href="${lvHref(lvMinus)}" aria-label="段数を減らす">−</a><span class="pct">${chart.levels}段</span><a class="zbtn" href="${lvHref(lvPlus)}" aria-label="段数を増やす">＋</a></span><span class="zlabel">図の大きさ：</span><span class="zoombox"><button type="button" id="zOut" aria-label="縮小">−</button><span class="pct" id="zPct">100%</span><button type="button" id="zIn" aria-label="拡大">＋</button><button type="button" id="zFit">等倍</button></span><span class="zlabel">横にスクロールできます</span></div>
   <div class="chart-wrap" id="chartWrap"><div class="chart-box" id="chartBox"><div class="chart-scale" id="chartScale">${chart.html}</div></div></div></div>
   <div class="card"><h3>会員を追加する</h3>${presetNote}${addMemberForm(basePath + '/add', scope, preset)}</div>
   <script>(function(){var z=1;var scale=document.getElementById('chartScale');var box=document.getElementById('chartBox');var pct=document.getElementById('zPct');if(!scale||!box||!pct)return;function apply(){scale.style.transform='scale('+z+')';box.style.width=Math.ceil(scale.scrollWidth*z)+'px';box.style.height=Math.ceil(scale.scrollHeight*z)+'px';pct.textContent=Math.round(z*100)+'%';}document.getElementById('zIn').addEventListener('click',function(){z=Math.min(2,Math.round(z*1.25*100)/100);apply();});document.getElementById('zOut').addEventListener('click',function(){z=Math.max(0.1,Math.round(z/1.25*100)/100);apply();});document.getElementById('zFit').addEventListener('click',function(){z=1;apply();});apply();})();</script>`;
