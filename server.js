@@ -353,7 +353,9 @@ async function updateMemberByLeader(leader, fields) {
 // - 対象の会員が存在しない
 // - 会社の枠（トップ）である
 // - 下に子（左・右どちらか）がいる（下の会員から先に削除する必要がある）
-// - いずれかのリーダーの担当トップになっている（そのリーダーの専用リンクが壊れる）
+// - 有効な（active）リーダーの担当トップになっている（そのリーダーの専用リンクが壊れる）。
+//   無効化済み（revoked）のリーダーは締めない: リーダー管理で無効化すれば担当トップを
+//   削除できるようにし、削除後にそのリーダーを再発行しようとした場合は再発行側で拒否する。
 // - その会員について本部の確認待ち（pending）の申告がある（先に要確認リストで対応する）
 function memberDeleteBlockReason(memberId) {
   const member = store.members[memberId];
@@ -361,8 +363,8 @@ function memberDeleteBlockReason(memberId) {
   if (memberId === ROOT_ID || member.root) return '会社の枠は削除できません。';
   const ch = childrenMap().get(memberId) || { L: null, R: null };
   if (ch.L || ch.R) return 'この会員の下に人がいるため削除できません。下の会員から先に削除してください。';
-  if (store.leaders.some(l => l.rootMemberId === memberId)) {
-    return 'この会員はリーダーの担当トップになっているため削除できません。先に本部のリーダー管理で対応してください。';
+  if (store.leaders.some(l => l.status === 'active' && l.rootMemberId === memberId)) {
+    return 'この会員はリーダーの担当トップになっているため削除できません。先に本部のリーダー管理で、そのリーダーを「無効化」してください。';
   }
   if (store.conflicts.some(c => c.status === 'pending' && c.memberId === memberId)) {
     return 'この会員には本部の確認待ちの申告があるため削除できません。先に要確認リストで対応してください。';
@@ -898,7 +900,10 @@ async function handleHqLeaders(req, res, url) {
     }
     const leader = store.leaders.find(l => l.id === body0.get('leaderId'));
     if (!leader) return redirect(res, back('/hq/leaders', 'err', 'リーダーが見つかりません。'));
-    if (action === 'reissue') { leader.token = newToken(); leader.status = 'active'; await saveStore(); return redirect(res, back('/hq/leaders', 'msg', '専用リンクを再発行しました（前のリンクは使えません）。')); }
+    if (action === 'reissue') {
+      if (!store.members[leader.rootMemberId]) return redirect(res, back('/hq/leaders', 'err', '担当トップの会員が存在しないため、再発行できません。'));
+      leader.token = newToken(); leader.status = 'active'; await saveStore(); return redirect(res, back('/hq/leaders', 'msg', '専用リンクを再発行しました（前のリンクは使えません）。'));
+    }
     if (action === 'revoke') { leader.status = 'revoked'; await saveStore(); return redirect(res, back('/hq/leaders', 'msg', '専用リンクを無効化しました。')); }
     return redirect(res, '/hq/leaders');
   }
