@@ -567,10 +567,12 @@ function memberOptions(selectedId, scopeIds) {
 // 箱は出さない。互換のため ?parentId=<id>&side=<L|R>#add-form のプリセット導線も残す。
 // 「表示する段数」（?levels=、2〜10）をデータの段数より大きくすると、データより
 // 先の段は全位置を薄い「空き」枠で埋めて、space-2のように先の段まで1枚の図として
-// 見せる。段数はデータが必要な段数より少なくはならない（データが優先）。
+// 見せる。明示指定がある場合はデータより深くても指定段数で打ち切り、隠れた部分は
+// 省略注記と「＋ 下を増やす」フォーカス導線からたどれるようにする。指定がない場合は
+// 従来どおり、データの深さに合わせて CHART_MAX_DEPTH まで表示する。
 const CHART_MAX_DEPTH = 10;
 const CHART_COL_W = 140;
-function collectChartItems(rootId) {
+function collectChartItems(rootId, maxDepth = CHART_MAX_DEPTH) {
   const map = childrenMap();
   const byDepth = new Map(); // depth -> [{type:'member'|'slot', pos, m?, parentId?, side?}]
   const omitted = new Set(); // 上限段で子がいる会員（省略注記を付ける）
@@ -584,7 +586,7 @@ function collectChartItems(rootId) {
     if (!m) return;
     push(depth, { type: 'member', pos, m });
     const ch = map.get(id) || { L: null, R: null };
-    if (depth >= CHART_MAX_DEPTH) {
+    if (depth >= maxDepth) {
       cutoff.add(id);
       if (ch.L || ch.R) omitted.add(id);
       return;
@@ -643,15 +645,22 @@ function renderChartGrid(rootId, basePath, reqLevels, focusCtx, opts) {
   const hqEditable = !!(opts && opts.hqEditable);
   // リーダー画面から渡される担当トップの会員ID。その会員の箱には削除リンクを付けない。
   const leaderRootId = opts && opts.leaderRootId ? opts.leaderRootId : null;
-  const { byDepth, omitted, cutoff } = collectChartItems(rootId);
+  // 明示指定された表示段数は、データがそれより深い場合でもその段数で打ち切る。
+  // そのため収集も表示最終段（相対深さ reqLevels - 1）までに制限し、最終段の会員を
+  // 既存の上限段と同じ cutoff / omitted として扱う。指定がない場合は従来どおり
+  // CHART_MAX_DEPTH まで収集する。
+  const collectionMaxDepth = reqLevels != null
+    ? Math.min(CHART_MAX_DEPTH, reqLevels - 1)
+    : CHART_MAX_DEPTH;
+  const { byDepth, omitted, cutoff } = collectChartItems(rootId, collectionMaxDepth);
   const focusId = focusCtx ? focusCtx.focusId : null;
   const levelOffset = focusCtx ? focusCtx.levelOffset : 0;
   const depths = [...byDepth.keys()].sort((a, b) => a - b);
   const floorDepth = depths.length ? depths[depths.length - 1] : 0;
   const floorLevels = floorDepth + 1;
-  // 表示段数：指定があってもデータが必要な段数（従来の表示）より少なくはしない
+  // 表示段数：明示指定があればその値をそのまま使う。指定がない場合はデータの段数。
   let displayLevels = floorLevels;
-  if (reqLevels != null) displayLevels = Math.max(floorLevels, reqLevels);
+  if (reqLevels != null) displayLevels = reqLevels;
   displayLevels = Math.max(2, displayLevels);
   const maxDepth = displayLevels - 1;
   const cols = Math.pow(2, maxDepth);
@@ -837,7 +846,7 @@ async function handleHqTree(req, res, url) {
     const key = r.result === 'error' ? 'err' : 'msg';
     return redirect(res, `${basePath}?${focusPart}${lvPart}${key}=${encodeURIComponent(r.message)}`);
   }
-  // 表示する段数（?levels=）。2〜10に丸め、データが必要な段数より少なくはならない（リーダー画面と同じ）。
+  // 表示する段数（?levels=）。2〜10に丸め、指定があればデータより深くてもその段数で表示する（リーダー画面と同じ）。
   let reqLevels = null;
   const lvRaw = url.searchParams.get('levels');
   if (lvRaw !== null && /^\d+$/.test(lvRaw.trim())) {
@@ -863,8 +872,8 @@ async function handleHqTree(req, res, url) {
   }
   const chartTopId = focusId || ROOT_ID;
   const chart = renderChartGrid(chartTopId, basePath, reqLevels, focusId ? { focusId, levelOffset } : null, { hqEditable: true });
-  const lvMinus = Math.min(CHART_MAX_DEPTH, Math.max(2, chart.levels - 1));
-  const lvPlus = Math.min(CHART_MAX_DEPTH, Math.max(2, chart.levels + 1));
+  const lvMinus = Math.max(2, chart.levels - 1);
+  const lvPlus = chart.levels < CHART_MAX_DEPTH ? chart.levels + 1 : chart.levels;
   // 段数の－/＋リンクは、枝フォーカス表示ではフォーカスを引き継ぐ
   const lvHref = (n) => focusId ? `${basePath}?focus=${encodeURIComponent(focusId)}&levels=${n}` : `${basePath}?levels=${n}`;
   let focusBanner = '';
@@ -1213,7 +1222,7 @@ async function handleLeader(req, res, url, token) {
   const presetNote = preset
     ? `<p class="flash ok">組織図で選択中：${esc(presetParent ? presetParent.name + '（' + presetParent.memberId + '）' : preset.parentId)} の${preset.side === 'L' ? '左' : '右'}（下のフォームに反映済みです。そのまま入力するか、プルダウンで変更もできます）</p>`
     : '';
-  // 表示する段数（?levels=）。2〜10に丸め、データが必要な段数より少なくはならない（renderChartGrid側で下限を確保）。
+  // 表示する段数（?levels=）。2〜10に丸め、指定があればデータより深くてもその段数で表示する（renderChartGrid側で打ち切る）。
   let reqLevels = null;
   const lvRaw = url.searchParams.get('levels');
   if (lvRaw !== null && /^\d+$/.test(lvRaw.trim())) {
@@ -1241,8 +1250,8 @@ async function handleLeader(req, res, url, token) {
     else levelOffset = focusPath.length - 1;
   }
   const chart = renderChartGrid(chartTopId, basePath, reqLevels, focusId ? { focusId, levelOffset } : null, { leaderRootId: leader.rootMemberId });
-  const lvMinus = Math.min(CHART_MAX_DEPTH, Math.max(2, chart.levels - 1));
-  const lvPlus = Math.min(CHART_MAX_DEPTH, Math.max(2, chart.levels + 1));
+  const lvMinus = Math.max(2, chart.levels - 1);
+  const lvPlus = chart.levels < CHART_MAX_DEPTH ? chart.levels + 1 : chart.levels;
   // 段数の－/＋リンクは、枝フォーカス表示ではフォーカスを引き継ぐ
   const lvHref = (n) => focusId ? `${basePath}?focus=${encodeURIComponent(focusId)}&levels=${n}` : `${basePath}?levels=${n}`;
   let focusBanner = '';
