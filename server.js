@@ -320,6 +320,31 @@ function pushConflict(kind, claimed, existingSnap, byName) {
   return c;
 }
 
+// ---------- 会員情報の修正（本部） ----------
+// 本部が組織図（ツリー）から会員の名前・登録日を直接修正する。権限は本部全体で、
+// 会社の枠だけは対象外にする。リーダーの修正と同様、これは訂正であり新規登録の
+// 申告ではないため、本部の要確認リスト（conflicts）は作らない。会員ID・親・位置・
+// 入力者は変更しない。
+async function updateMemberByHq(fields) {
+  const memberId = String(fields.memberId || '').trim();
+  const member = store.members[memberId];
+  if (!member || memberId === ROOT_ID || member.root) {
+    return { result: 'error', message: '修正できる会員が見つかりません。' };
+  }
+  const name = String(fields.name || '').trim();
+  if (!name || name.length > 100) return { result: 'error', message: '名前を入力してください（100文字まで）。' };
+  const submittedDate = String(fields.regDate || '').trim();
+  let regDate = member.regDate || '';
+  if (submittedDate) {
+    if (!validDate(submittedDate)) return { result: 'error', message: '登録日は YYYY-MM-DD 形式の正しい日付で入力してください。' };
+    regDate = submittedDate;
+  }
+  member.name = name;
+  member.regDate = regDate;
+  await saveStore();
+  return { result: 'updated', message: '会員情報を修正しました。' };
+}
+
 // ---------- 会員情報の修正（リーダー） ----------
 // リーダーが自分の担当範囲内にある会員の名前・登録日を直接修正する。
 // これは担当リーダーによる訂正であり、新規登録の申告ではないため、本部の要確認リスト
@@ -604,14 +629,18 @@ function chartSlotForm(basePath, slot, today, levels, focusId) {
 // 先頭に開き直せるようにすることで、深い枝を何度でもたどれる（単独版 space-2 の
 // 「10段目以降は枝ごとに伸ばす」ハイブリッド方式と同じ考え方）。段ラベルは
 // levelOffset を加えて、担当範囲全体での実際の段数で表示する。
-// opts.viewOnly（本部のツリー表示用）: 見る専用モード。空き枠はフォームにせず
-// 薄い「空き」枠のままにし、会員の箱に修正リンクを付けない。その代わり、会社以外の
-// 全会員の箱に、その会員を先頭に開く「この人から下を見る」リンクを付ける。
+// opts.viewOnly: 見る専用モード。空き枠はフォームにせず薄い「空き」枠のままにし、
+// 会員の箱に修正・削除リンクを付けない。
+// opts.hqEditable（本部のツリー表示用）: 本部が図の中で追加・修正・削除できる編集
+// モード。空き枠は basePath（/hq/tree）へ送る入力フォームにし、会員の箱には修正・
+// 削除リンクを付ける。加えて、会社以外の全会員の箱に、その会員を先頭に開く
+// 「この人から下を見る」リンクを付ける。
 // フォーカス（下を増やす）リンクは basePath に対して付くので、本部用は /hq/tree への
 // ドリルダウンになる。
 function renderChartGrid(rootId, basePath, reqLevels, focusCtx, opts) {
   const today = todayJst();
   const viewOnly = !!(opts && opts.viewOnly);
+  const hqEditable = !!(opts && opts.hqEditable);
   // リーダー画面から渡される担当トップの会員ID。その会員の箱には削除リンクを付けない。
   const leaderRootId = opts && opts.leaderRootId ? opts.leaderRootId : null;
   const { byDepth, omitted, cutoff } = collectChartItems(rootId);
@@ -655,7 +684,7 @@ function renderChartGrid(rootId, basePath, reqLevels, focusCtx, opts) {
           const note = omitted.has(it.m.memberId) ? `<div class="small chart-note">（これより下は省略しています）</div>` : '';
           // 会員の箱から、その会員を対象にした修正フォームへ移動できるようにする。
           // いま見ている枝（focus）と、明示指定された表示段数（levels）があれば引き継ぐ。
-          // 見る専用モード（本部）では修正リンクを付けない。
+          // 見る専用モードでは修正リンクを付けない（本部の編集モードでは付ける）。
           let editHref = '';
           if (!viewOnly) {
             editHref = `${basePath}?edit=${encodeURIComponent(it.m.memberId)}`;
@@ -663,8 +692,10 @@ function renderChartGrid(rootId, basePath, reqLevels, focusCtx, opts) {
             if (reqLevels != null) editHref += `&levels=${reqLevels}`;
             editHref += '#edit-form';
           }
-          // リーダー画面では、担当トップ以外の会員の箱に「削除」リンクも付ける
-          // （削除の確認カードへ移動するだけ。実際に消せるかはサーバー側の共通ガードで判定）。
+          // 編集できる画面では、リーダーの担当トップ以外の会員の箱に「削除」リンクも
+          // 付ける（削除の確認カードへ移動するだけ。実際に消せるかはサーバー側の
+          // 共通ガードで判定する。本部の編集モードでは leaderRootId が無いため、
+          // 会社以外の会員が対象になる）。
           let deleteHref = '';
           if (!viewOnly && it.m.memberId !== leaderRootId) {
             deleteHref = `${basePath}?delete=${encodeURIComponent(it.m.memberId)}`;
@@ -678,9 +709,9 @@ function renderChartGrid(rootId, basePath, reqLevels, focusCtx, opts) {
           const drill = cutoff.has(it.m.memberId)
             ? `<a class="chart-drill" href="${basePath}?focus=${encodeURIComponent(it.m.memberId)}${reqLevels != null ? '&levels=' + reqLevels : ''}#chartWrap">＋ 下を増やす</a>`
             : '';
-          // 見る専用モード（本部）では、会社以外の全会員の箱から、その会員を先頭にした
-          // 図へ直接移動できるリンクを付ける（リーダー画面には付けない）。
-          const focusHref = viewOnly && !it.m.root
+          // 本部モード（見る専用・編集のどちらでも）では、会社以外の全会員の箱から、
+          // その会員を先頭にした図へ直接移動できるリンクを付ける（リーダー画面には付けない）。
+          const focusHref = (viewOnly || hqEditable) && !it.m.root
             ? `${basePath}?focus=${encodeURIComponent(it.m.memberId)}#chartWrap`
             : '';
           cells += `<div class="chart-cell" style="${cellStyle(d, it.pos)}">${chartNodeHtml(it.m, editHref, focusHref, deleteHref)}${note}${drill}</div>`;
@@ -776,12 +807,36 @@ async function handleHq(req, res, url) {
   return send(res, 200, page('本部：組織図', body, flashFrom(url)));
 }
 // 本部の組織図（ツリー表示）。リーダー画面と同じ段グリッドの組織図を、会社を先頭に
-// 全体表示する見る専用ページ。空き枠は入力フォームにせず「空き」枠のまま見せ、
-// 会員の追加・修正は従来の画面（会員一覧・リーダー画面）で行う。
+// 全体表示し、本部が図の中でそのまま追加・修正・削除できるページ。空き枠は入力
+// フォームにし、会員の箱には修正・削除リンクを付ける（会社の枠は編集対象外）。
 // 深い組織のために、リーダー画面と同じ枝フォーカス（?focus=）が使える。
 async function handleHqTree(req, res, url) {
   if (!isHq(req)) return redirect(res, '/login');
   const basePath = '/hq/tree';
+  if (req.method === 'POST') {
+    const action = url.pathname.endsWith('/add') ? 'add'
+      : url.pathname.endsWith('/edit') ? 'edit'
+      : url.pathname.endsWith('/delete') ? 'delete'
+      : null;
+    if (!action) return send(res, 404, page('見つかりません', '<div class="card"><h2>ページが見つかりません</h2></div>'));
+    const body0 = await readBody(req);
+    const fields = Object.fromEntries(body0);
+    const r = action === 'add'
+      ? await addMember({ type: 'hq' }, fields)
+      : action === 'edit'
+        ? await updateMemberByHq(fields)
+        : await deleteMemberByHq(fields);
+    // 戻り先では、実在する会社以外の会員へのフォーカスと、2〜10の表示段数だけを
+    // 引き継ぐ。削除した会員自身がフォーカス先だった場合は、削除後に実在しないため
+    // 引き継がれず、全体表示に戻る。
+    const rawFocus = String(body0.get('focus') || '').trim();
+    const focusPart = rawFocus && rawFocus !== ROOT_ID && store.members[rawFocus]
+      ? `focus=${encodeURIComponent(rawFocus)}&`
+      : '';
+    const lvPart = leaderLevelsPart(body0.get('levels'));
+    const key = r.result === 'error' ? 'err' : 'msg';
+    return redirect(res, `${basePath}?${focusPart}${lvPart}${key}=${encodeURIComponent(r.message)}`);
+  }
   // 表示する段数（?levels=）。2〜10に丸め、データが必要な段数より少なくはならない（リーダー画面と同じ）。
   let reqLevels = null;
   const lvRaw = url.searchParams.get('levels');
@@ -807,7 +862,7 @@ async function handleHqTree(req, res, url) {
     else levelOffset = focusPath.length - 1;
   }
   const chartTopId = focusId || ROOT_ID;
-  const chart = renderChartGrid(chartTopId, basePath, reqLevels, focusId ? { focusId, levelOffset } : null, { viewOnly: true });
+  const chart = renderChartGrid(chartTopId, basePath, reqLevels, focusId ? { focusId, levelOffset } : null, { hqEditable: true });
   const lvMinus = Math.min(CHART_MAX_DEPTH, Math.max(2, chart.levels - 1));
   const lvPlus = Math.min(CHART_MAX_DEPTH, Math.max(2, chart.levels + 1));
   // 段数の－/＋リンクは、枝フォーカス表示ではフォーカスを引き継ぐ
@@ -824,13 +879,58 @@ async function handleHqTree(req, res, url) {
     focusBanner = `<p class="crumbs">表示中の枝：${crumbs}</p>
   <p class="small">いまは <strong>${esc(fm.name)}</strong> さん（全体では${levelOffset + 1}段目）の下の図を表示しています。先の段の会員の「＋ 下を増やす」を押せば、その枝をさらに下へたどれます。<a href="${basePath}">全体の図に戻る</a></p>`;
   }
+  // 修正・削除カードのキャンセルで、見ていたツリー表示（フォーカス・段数）へ戻す。
+  const viewParams = [];
+  if (focusId) viewParams.push(`focus=${encodeURIComponent(focusId)}`);
+  if (reqLevels != null) viewParams.push(`levels=${reqLevels}`);
+  const currentViewHref = viewParams.length ? `${basePath}?${viewParams.join('&')}` : basePath;
+  // 会員情報の修正（?edit=<会員ID>）。実在する会社以外の会員だけを対象にする。
+  const editParam = (url.searchParams.get('edit') || '').trim();
+  const editMember = editParam && editParam !== ROOT_ID && store.members[editParam] && !store.members[editParam].root
+    ? store.members[editParam] : null;
+  let editCard = '';
+  if (editMember) {
+    editCard = `<div class="card" id="edit-form"><h3>会員情報を修正する</h3>
+  <p class="small">対象：${esc(editMember.name)}（${esc(editMember.memberId)}）</p>
+  <form method="post" action="${basePath}/edit">
+  <label>名前<input name="name" value="${esc(editMember.name)}" required maxlength="100"></label>
+  <label>登録日<input name="regDate" type="date" value="${esc(editMember.regDate || '')}"></label>
+  <input type="hidden" name="memberId" value="${esc(editMember.memberId)}">
+  ${focusId ? `<input type="hidden" name="focus" value="${esc(focusId)}">` : ''}
+  ${reqLevels != null ? `<input type="hidden" name="levels" value="${reqLevels}">` : ''}
+  <button type="submit">変更を保存</button> <a class="btn sub" href="${currentViewHref}">キャンセル</a></form></div>`;
+  }
+  // 会員の削除（?delete=<会員ID>）。実在する会社以外の会員だけを確認対象にし、
+  // 共通ガードで消せない場合は理由だけを表示して削除フォーム自体を出さない。
+  const deleteParam = (url.searchParams.get('delete') || '').trim();
+  const deleteTarget = deleteParam && deleteParam !== ROOT_ID && store.members[deleteParam] && !store.members[deleteParam].root
+    ? store.members[deleteParam] : null;
+  let deleteCard = '';
+  if (deleteTarget) {
+    const parent = deleteTarget.parentId ? store.members[deleteTarget.parentId] : null;
+    const blockReason = memberDeleteBlockReason(deleteTarget.memberId);
+    const actionHtml = blockReason
+      ? `<p class="flash ng">${esc(blockReason)}</p>`
+      : `<p class="small">この操作は元に戻せません。間違えて配置した会員だけを削除してください。</p>
+  <form method="post" action="${basePath}/delete">
+  <input type="hidden" name="memberId" value="${esc(deleteTarget.memberId)}">
+  ${focusId ? `<input type="hidden" name="focus" value="${esc(focusId)}">` : ''}
+  ${reqLevels != null ? `<input type="hidden" name="levels" value="${reqLevels}">` : ''}
+  <button class="danger" type="submit">削除する</button> <a class="btn sub" href="${currentViewHref}">キャンセル</a></form>`;
+    deleteCard = `<div class="card" id="delete-form"><h3>会員を削除する</h3>
+  <p class="small">対象：${esc(deleteTarget.name)}（${esc(deleteTarget.memberId)}） / 登録：${esc(deleteTarget.regDate || '-')} / 親：${esc(parent ? parent.name + '（' + parent.memberId + '）' : '')} の${deleteTarget.side === 'L' ? '左' : deleteTarget.side === 'R' ? '右' : ''}</p>
+  ${actionHtml}</div>`;
+  }
   const body = `${hqNav()}
   <div class="card"><h2>組織図（ツリー表示・会社全体）</h2>
-  <p class="small">会社全体の組織図です。この画面は見る専用です（空き枠は入力できません）。会員の追加は「会員一覧」から、登録内容の修正はリーダー画面など従来の画面から行ってください。</p>
-  <p class="small">「表示する段数」の＋を押すと、まだ誰もいない先の段まで図を広げて見られます。各会員の「この人から下を見る」を押すと、その人を先頭にした図へ移動できます。図の一番下の段にいる会員の「＋ 下を増やす」を押すと、その人を先頭にして、さらに下の枝を見られます（何度でも繰り返せます）。</p>
+  <p class="small">会社全体の組織図です。空いている場所の枠に名前を入力して「登録」を押すと、その場所にそのまま登録できます（登録日には今日の日付が入っています。変える場合は日付を変更してください）。</p>
+  <p class="small">各会員の箱の「名前を修正」から名前・登録日を直せます。「削除」は、下に人がいる場合など、組織を壊すおそれがある場合はできません（理由は確認画面に表示されます）。</p>
+  <p class="small">「表示する段数」の＋を押すと、まだ誰もいない先の段まで図を広げて見られます。先の段の「空き」を押すと、その枝の登録できる空き枠へ移動します。各会員の「この人から下を見る」を押すと、その人を先頭にした図へ移動できます。図の一番下の段にいる会員の「＋ 下を増やす」を押すと、その人を先頭にして、さらに下の枝を見たり入力したりできます（何度でも繰り返せます）。</p>
   ${focusBanner}
   <div class="chart-bar"><span class="zlabel">表示する段数：</span><span class="zoombox"><a class="zbtn" href="${lvHref(lvMinus)}" aria-label="段数を減らす">−</a><span class="pct">${chart.levels}段</span><a class="zbtn" href="${lvHref(lvPlus)}" aria-label="段数を増やす">＋</a></span><span class="zlabel">図の大きさ：</span><span class="zoombox"><button type="button" id="zOut" aria-label="縮小">−</button><span class="pct" id="zPct">100%</span><button type="button" id="zIn" aria-label="拡大">＋</button><button type="button" id="zFit">等倍</button></span><span class="zlabel">横にスクロールできます</span></div>
   <div class="chart-wrap" id="chartWrap"><div class="chart-box" id="chartBox"><div class="chart-scale" id="chartScale">${chart.html}</div></div></div></div>
+  ${editCard}
+  ${deleteCard}
   <script>(function(){var z=1;var scale=document.getElementById('chartScale');var box=document.getElementById('chartBox');var pct=document.getElementById('zPct');if(!scale||!box||!pct)return;function apply(){scale.style.transform='scale('+z+')';box.style.width=Math.ceil(scale.scrollWidth*z)+'px';box.style.height=Math.ceil(scale.scrollHeight*z)+'px';pct.textContent=Math.round(z*100)+'%';}document.getElementById('zIn').addEventListener('click',function(){z=Math.min(2,Math.round(z*1.25*100)/100);apply();});document.getElementById('zOut').addEventListener('click',function(){z=Math.max(0.1,Math.round(z/1.25*100)/100);apply();});document.getElementById('zFit').addEventListener('click',function(){z=1;apply();});apply();})();</script>`;
   return send(res, 200, page('本部：組織図（ツリー）', body, flashFrom(url)));
 }
@@ -1230,7 +1330,7 @@ const server = http.createServer(async (req, res) => {
       return redirect(res, '/login', 'sid=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0');
     }
     if (p === '/hq') return handleHq(req, res, url);
-    if (p === '/hq/tree') return handleHqTree(req, res, url);
+    if (p === '/hq/tree' || p === '/hq/tree/add' || p === '/hq/tree/edit' || p === '/hq/tree/delete') return handleHqTree(req, res, url);
     if (p === '/hq/members' || p === '/hq/members/add' || p === '/hq/members/delete') return handleHqMembers(req, res, url);
     if (p === '/hq/leaders') return handleHqLeaders(req, res, url);
     if (p === '/hq/conflicts') return handleHqConflicts(req, res, url);
