@@ -234,7 +234,8 @@ function findChild(parentId, side) {
   return null;
 }
 function sameContent(a, b) {
-  return a.name === b.name && a.parentId === b.parentId && a.side === b.side && a.regDate === b.regDate;
+  return a.name === b.name && a.parentId === b.parentId && a.side === b.side && a.regDate === b.regDate
+    && (a.introducer || '') === (b.introducer || '');
 }
 
 // ---------- 会員IDの自動採番 ----------
@@ -271,6 +272,8 @@ async function addMember(actor, fields) {
   let regDate = String(fields.regDate || '').trim();
   // 登録日が未入力なら、今日（日本時間）を既定にする（組織図内のフォーム・下のフォーム共通）
   if (!regDate) regDate = todayJst();
+  // 紹介者（任意入力の自由記入。空欄なら未記入として扱う）
+  const introducer = String(fields.introducer || '').trim();
   const byName = actor.type === 'hq' ? '本部' : ('リーダー:' + actor.leader.name);
 
   if (memberId === '') {
@@ -282,6 +285,7 @@ async function addMember(actor, fields) {
     if (memberId === ROOT_ID) return { result: 'error', message: 'その会員IDは使えません。' };
   }
   if (!name || name.length > 100) return { result: 'error', message: '名前を入力してください（100文字まで）。' };
+  if (introducer.length > 100) return { result: 'error', message: '紹介者は100文字以内で入力してください。' };
   if (!validDate(regDate)) return { result: 'error', message: '登録日は YYYY-MM-DD 形式の正しい日付で入力してください。' };
   if (side !== 'L' && side !== 'R') return { result: 'error', message: '位置は左か右を選んでください。' };
   const parent = store.members[parentId];
@@ -293,7 +297,7 @@ async function addMember(actor, fields) {
     if (!scope.has(parentId)) return { result: 'error', message: '自分の配下の範囲外には追加できません。' };
   }
 
-  const claimed = { memberId, name, parentId, side, regDate };
+  const claimed = { memberId, name, parentId, side, regDate, introducer };
   const existing = store.members[memberId];
   if (existing) {
     if (sameContent(existing, claimed)) return { result: 'duplicate', message: '同じ内容で登録済みのため、変更はありませんでした。' };
@@ -339,6 +343,13 @@ async function updateMemberByHq(fields) {
     if (!validDate(submittedDate)) return { result: 'error', message: '登録日は YYYY-MM-DD 形式の正しい日付で入力してください。' };
     regDate = submittedDate;
   }
+  // 紹介者：フォームから送られてきた場合だけ更新する（空で送られたら未記入に戻す）。
+  // フィールド自体が無い送信では、今の値をそのまま残す。
+  if (fields.introducer !== undefined) {
+    const introducer = String(fields.introducer || '').trim();
+    if (introducer.length > 100) return { result: 'error', message: '紹介者は100文字以内で入力してください。' };
+    member.introducer = introducer;
+  }
   member.name = name;
   member.regDate = regDate;
   await saveStore();
@@ -364,6 +375,13 @@ async function updateMemberByLeader(leader, fields) {
   if (submittedDate) {
     if (!validDate(submittedDate)) return { result: 'error', message: '登録日は YYYY-MM-DD 形式の正しい日付で入力してください。' };
     regDate = submittedDate;
+  }
+  // 紹介者：フォームから送られてきた場合だけ更新する（空で送られたら未記入に戻す）。
+  // フィールド自体が無い送信では、今の値をそのまま残す。
+  if (fields.introducer !== undefined) {
+    const introducer = String(fields.introducer || '').trim();
+    if (introducer.length > 100) return { result: 'error', message: '紹介者は100文字以内で入力してください。' };
+    member.introducer = introducer;
   }
   member.name = name;
   member.regDate = regDate;
@@ -538,9 +556,10 @@ function renderTree(rootId, maxDepth = 30, depth = 0) {
   const m = store.members[rootId];
   if (!m) return '';
   const c = countsFor(rootId);
+  const introPart = m.introducer ? ` / 紹介:${esc(m.introducer)}` : '';
   const label = m.root
     ? `<span class="node root-node">${esc(m.name)}</span>`
-    : `<span class="node"><strong>${esc(m.name)}</strong> <span class="small">ID:${esc(m.memberId)} / 登録:${esc(m.regDate || '-')} / 左${c.left}・右${c.right}</span></span>`;
+    : `<span class="node"><strong>${esc(m.name)}</strong> <span class="small">ID:${esc(m.memberId)} / 登録:${esc(m.regDate || '-')}${introPart} / 左${c.left}・右${c.right}</span></span>`;
   if (depth >= maxDepth) return `<li>${label} <span class="small">（これより下は会員一覧で確認してください）</span></li>`;
   const map = childrenMap();
   const ch = map.get(rootId);
@@ -604,7 +623,8 @@ function chartNodeHtml(m, editHref, focusHref, deleteHref) {
   const editLink = editHref ? `<br><a class="chart-edit" href="${editHref}">名前を修正</a>` : '';
   const deleteLink = deleteHref ? `<a class="chart-delete" href="${deleteHref}">削除</a>` : '';
   const focusLink = focusHref ? `<br><a class="chart-focus-link" href="${focusHref}">この人から下を見る</a>` : '';
-  return `<div class="chart-node"><strong>${esc(m.name)}</strong><br><span class="small">ID:${esc(m.memberId)}<br>登録:${esc(m.regDate || '-')}<br>左${c.left}・右${c.right}</span>${editLink}${deleteLink}${focusLink}</div>`;
+  const introLine = m.introducer ? `<br>紹介:${esc(m.introducer)}` : '';
+  return `<div class="chart-node"><strong>${esc(m.name)}</strong><br><span class="small">ID:${esc(m.memberId)}<br>登録:${esc(m.regDate || '-')}${introLine}<br>左${c.left}・右${c.right}</span>${editLink}${deleteLink}${focusLink}</div>`;
 }
 // 空き枠セルのアンカーID。HTML id として安全な文字だけを使い、それ以外は '-' に置き換える。
 function slotAnchorId(parentId, side) {
@@ -619,6 +639,7 @@ function chartSlotForm(basePath, slot, today, levels, focusId) {
   return `<form class="chart-slot" method="post" action="${basePath}/add"><div class="slot-title">＋ ${sideLabel}に追加</div>`
     + `<input type="text" name="name" placeholder="名前" maxlength="100">`
     + `<input type="date" name="regDate" value="${today}">`
+    + `<input type="text" name="introducer" placeholder="紹介者（任意）" maxlength="100">`
     + `<input type="hidden" name="parentId" value="${esc(slot.parentId)}">`
     + `<input type="hidden" name="side" value="${slot.side}">`
     + `<input type="hidden" name="levels" value="${levels}">`
@@ -758,6 +779,7 @@ function addMemberForm(action, scopeIds, preset) {
   return `<form method="post" action="${action}" id="add-form">
   <label>名前<input name="name" required maxlength="100"></label>
   <label>登録日<input name="regDate" required type="date"></label>
+  <label>紹介者（任意）<input name="introducer" maxlength="100"></label>
   <label>上に付く人（親）<select name="parentId">${memberOptions(pre.parentId || '', scopeIds)}</select></label>
   <label>位置<select name="side"><option value="L" ${pre.side === 'L' ? 'selected' : ''}>左</option><option value="R" ${pre.side === 'R' ? 'selected' : ''}>右</option></select></label>
   <button type="submit">登録する</button></form>`;
@@ -904,6 +926,7 @@ async function handleHqTree(req, res, url) {
   <form method="post" action="${basePath}/edit">
   <label>名前<input name="name" value="${esc(editMember.name)}" required maxlength="100"></label>
   <label>登録日<input name="regDate" type="date" value="${esc(editMember.regDate || '')}"></label>
+  <label>紹介者（任意）<input name="introducer" value="${esc(editMember.introducer || '')}" maxlength="100"></label>
   <input type="hidden" name="memberId" value="${esc(editMember.memberId)}">
   ${focusId ? `<input type="hidden" name="focus" value="${esc(focusId)}">` : ''}
   ${reqLevels != null ? `<input type="hidden" name="levels" value="${reqLevels}">` : ''}
@@ -932,8 +955,8 @@ async function handleHqTree(req, res, url) {
   }
   const body = `${hqNav()}
   <div class="card"><h2>組織図（ツリー表示・会社全体）</h2>
-  <p class="small">会社全体の組織図です。空いている場所の枠に名前を入力して「登録」を押すと、その場所にそのまま登録できます（登録日には今日の日付が入っています。変える場合は日付を変更してください）。</p>
-  <p class="small">各会員の箱の「名前を修正」から名前・登録日を直せます。「削除」は、下に人がいる場合など、組織を壊すおそれがある場合はできません（理由は確認画面に表示されます）。</p>
+  <p class="small">会社全体の組織図です。空いている場所の枠に名前を入力して「登録」を押すと、その場所にそのまま登録できます（登録日には今日の日付が入っています。変える場合は日付を変更してください）。紹介者が分かる場合は、任意で紹介者も入力できます。</p>
+  <p class="small">各会員の箱の「名前を修正」から名前・登録日・紹介者を直せます。「削除」は、下に人がいる場合など、組織を壊すおそれがある場合はできません（理由は確認画面に表示されます）。</p>
   <p class="small">「表示する段数」の＋を押すと、まだ誰もいない先の段まで図を広げて見られます。先の段の「空き」を押すと、その枝の登録できる空き枠へ移動します。各会員の「この人から下を見る」を押すと、その人を先頭にした図へ移動できます。図の一番下の段にいる会員の「＋ 下を増やす」を押すと、その人を先頭にして、さらに下の枝を見たり入力したりできます（何度でも繰り返せます）。</p>
   ${focusBanner}
   <div class="chart-bar"><span class="zlabel">表示する段数：</span><span class="zoombox"><a class="zbtn" href="${lvHref(lvMinus)}" aria-label="段数を減らす">−</a><span class="pct">${chart.levels}段</span><a class="zbtn" href="${lvHref(lvPlus)}" aria-label="段数を増やす">＋</a></span><span class="zlabel">図の大きさ：</span><span class="zoombox"><button type="button" id="zOut" aria-label="縮小">−</button><span class="pct" id="zPct">100%</span><button type="button" id="zIn" aria-label="拡大">＋</button><button type="button" id="zFit">等倍</button></span><span class="zlabel">横にスクロールできます</span></div>
@@ -957,7 +980,7 @@ async function handleHqMembers(req, res, url) {
   }
   const q = (url.searchParams.get('q') || '').trim().toLowerCase();
   let list = Object.values(store.members);
-  if (q) list = list.filter(m => m.name.toLowerCase().includes(q) || m.memberId.toLowerCase().includes(q));
+  if (q) list = list.filter(m => m.name.toLowerCase().includes(q) || m.memberId.toLowerCase().includes(q) || (m.introducer || '').toLowerCase().includes(q));
   list.sort((a, b) => (a.root ? 0 : 1) - (b.root ? 0 : 1) || a.memberId.localeCompare(b.memberId));
   const memberCount = list.filter(m => !m.root).length;
   const rows = list.map(m => {
@@ -965,7 +988,7 @@ async function handleHqMembers(req, res, url) {
     const parent = m.parentId ? store.members[m.parentId] : null;
     const treeHref = m.root ? '/hq/tree' : `/hq/tree?focus=${encodeURIComponent(m.memberId)}`;
     const deleteCell = m.root ? '<td></td>' : `<td><a href="/hq/members?delete=${encodeURIComponent(m.memberId)}#delete-form">削除</a></td>`;
-    return `<tr><td>${esc(m.memberId)}</td><td>${esc(m.name)}</td><td>${esc(m.regDate || '')}</td><td>${esc(parent ? parent.name + '（' + parent.memberId + '）' : '')}</td><td>${m.side === 'L' ? '左' : m.side === 'R' ? '右' : ''}</td><td>${c.left}</td><td>${c.right}</td><td>${esc(m.enteredBy || '')}</td><td><a href="${treeHref}">ツリーで見る</a></td>${deleteCell}</tr>`;
+    return `<tr><td>${esc(m.memberId)}</td><td>${esc(m.name)}</td><td>${esc(m.introducer || '')}</td><td>${esc(m.regDate || '')}</td><td>${esc(parent ? parent.name + '（' + parent.memberId + '）' : '')}</td><td>${m.side === 'L' ? '左' : m.side === 'R' ? '右' : ''}</td><td>${c.left}</td><td>${c.right}</td><td>${esc(m.enteredBy || '')}</td><td><a href="${treeHref}">ツリーで見る</a></td>${deleteCell}</tr>`;
   }).join('');
   // 会員の削除（?delete=<会員ID>）。実在する会員（会社の枠以外）のときだけ確認カードを出す。
   // 下に人がいる等で消せない場合は理由を表示し、削除ボタン自体を出さない
@@ -987,8 +1010,8 @@ async function handleHqMembers(req, res, url) {
   ${actionHtml}</div>`;
   }
   const body = `${hqNav()}<div class="card"><h2>会員一覧（${memberCount}件）</h2>
-  <form method="get" action="/hq/members"><input name="q" value="${esc(q)}" placeholder="名前・会員IDで検索"><button type="submit">検索</button></form>
-  <table><tr><th>会員ID</th><th>名前</th><th>登録日</th><th>親</th><th>位置</th><th>左人数</th><th>右人数</th><th>入力者</th><th>ツリー</th><th>削除</th></tr>${rows || '<tr><td colspan="10">該当なし</td></tr>'}</table></div>
+  <form method="get" action="/hq/members"><input name="q" value="${esc(q)}" placeholder="名前・会員ID・紹介者で検索"><button type="submit">検索</button></form>
+  <table><tr><th>会員ID</th><th>名前</th><th>紹介者</th><th>登録日</th><th>親</th><th>位置</th><th>左人数</th><th>右人数</th><th>入力者</th><th>ツリー</th><th>削除</th></tr>${rows || '<tr><td colspan="11">該当なし</td></tr>'}</table></div>
   ${hqDeleteCard}
   <div class="card"><h3>会員を追加（本部）</h3>${addMemberForm('/hq/members/add', null)}</div>`;
   return send(res, 200, page('本部：会員一覧', body, flashFrom(url)));
@@ -1057,7 +1080,7 @@ async function handleHqConflicts(req, res, url) {
           const occ = findChild(claimed.parentId, claimed.side);
           if (occ && occ.memberId !== c.memberId) return redirect(res, back('/hq/conflicts', 'err', '移動先の位置は既に埋まっているため採用できません。先にそちらを整理してください。'));
         }
-        Object.assign(cur, { name: claimed.name, parentId: claimed.parentId, side: claimed.side, regDate: claimed.regDate, enteredBy: c.submittedByName + '（本部が採用）' });
+        Object.assign(cur, { name: claimed.name, parentId: claimed.parentId, side: claimed.side, regDate: claimed.regDate, introducer: claimed.introducer !== undefined ? claimed.introducer : (cur.introducer || ''), enteredBy: c.submittedByName + '（本部が採用）' });
       } else { // position: 新規会員だが位置が埋まっていた
         if (store.members[c.memberId]) return redirect(res, back('/hq/conflicts', 'err', 'その会員IDは既に登録されています。'));
         const occ = findChild(claimed.parentId, claimed.side);
@@ -1090,10 +1113,10 @@ function handleExportCsv(req, res) {
   if (!isHq(req)) return redirect(res, '/login');
   const list = Object.values(store.members).filter(m => !m.root).sort((a, b) => a.memberId.localeCompare(b.memberId));
   const quote = v => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
-  const lines = [['会員ID', '名前', '登録日', '親の会員ID', '位置', '左人数', '右人数', '配下合計'].join(',')];
+  const lines = [['会員ID', '名前', '紹介者', '登録日', '親の会員ID', '位置', '左人数', '右人数', '配下合計'].join(',')];
   for (const m of list) {
     const c = countsFor(m.memberId);
-    lines.push([m.memberId, m.name, m.regDate || '', m.parentId || '', m.side === 'L' ? '左' : m.side === 'R' ? '右' : '', c.left, c.right, c.total].map(quote).join(','));
+    lines.push([m.memberId, m.name, m.introducer || '', m.regDate || '', m.parentId || '', m.side === 'L' ? '左' : m.side === 'R' ? '右' : '', c.left, c.right, c.total].map(quote).join(','));
   }
   const csv = '﻿' + lines.join('\r\n') + '\r\n';
   res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="members.csv"' });
@@ -1108,7 +1131,7 @@ const CONSENT_TEXT = `
 <div class="card"><h2>情報の取り扱いについて</h2>
 <p>この画面は、組織図の作成と会社による会員管理のために使います。</p>
 <ul>
-<li>集める情報：名前、会員ID、バイナリー上の位置、登録日（連絡先は集めません）</li>
+<li>集める情報：名前、会員ID、バイナリー上の位置、登録日、紹介者（連絡先は集めません）</li>
 <li>見ることができる人：本部は全体を見ることができます。リーダーは自分の配下だけを見ることができます。一般の会員に公開されることはありません。</li>
 <li>同じ会員IDで違う内容が入力された場合は、勝手に上書きされず、本部の確認に回ります。</li>
 </ul>
@@ -1277,6 +1300,7 @@ async function handleLeader(req, res, url, token) {
   <form method="post" action="${basePath}/edit">
   <label>名前<input name="name" value="${esc(editMember.name)}" required maxlength="100"></label>
   <label>登録日<input name="regDate" type="date" value="${esc(editMember.regDate || '')}"></label>
+  <label>紹介者（任意）<input name="introducer" value="${esc(editMember.introducer || '')}" maxlength="100"></label>
   <input type="hidden" name="memberId" value="${esc(editMember.memberId)}">
   ${focusId ? `<input type="hidden" name="focus" value="${esc(focusId)}">` : ''}
   ${reqLevels != null ? `<input type="hidden" name="levels" value="${reqLevels}">` : ''}
@@ -1306,7 +1330,7 @@ async function handleLeader(req, res, url, token) {
   }
   const body = `${searchCard}<div class="card"><h2>${esc(leader.name)} さんの組織</h2>
   <p class="small">担当トップ：${esc(root ? root.name + '（' + root.memberId + '）' : leader.rootMemberId)} / ここから下だけが表示・入力できます。</p>
-  <p class="small">空いている場所の枠に名前を入力して「登録」を押すと、その場所にそのまま登録できます（登録日には今日の日付が入っています。変える場合は日付を変更してください）。下のフォームから親と位置を選んで登録することもできます。</p>
+  <p class="small">空いている場所の枠に名前を入力して「登録」を押すと、その場所にそのまま登録できます（登録日には今日の日付が入っています。変える場合は日付を変更してください）。紹介者が分かる場合は、任意で紹介者も入力できます。下のフォームから親と位置を選んで登録することもできます。</p>
   <p class="small">「表示する段数」の＋を押すと、まだ誰もいない先の段まで図を広げて見られます。先の段の「空き」を押すと、その枝の登録できる空き枠へ移動します。</p>
   <p class="small">図の一番下の段にいる会員の「＋ 下を増やす」を押すと、その人を先頭にして、さらに下の枝を見たり入力したりできます（何度でも繰り返せます）。</p>
   ${focusBanner}
