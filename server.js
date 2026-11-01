@@ -272,7 +272,7 @@ async function addMember(actor, fields) {
   let regDate = String(fields.regDate || '').trim();
   // 登録日が未入力なら、今日（日本時間）を既定にする（組織図内のフォーム・下のフォーム共通）
   if (!regDate) regDate = todayJst();
-  // 紹介者（任意入力の自由記入。空欄なら未記入として扱う）
+  // 紹介者（必須入力の自由記入。空欄なら登録しない）
   const introducer = String(fields.introducer || '').trim();
   const byName = actor.type === 'hq' ? '本部' : ('リーダー:' + actor.leader.name);
 
@@ -285,6 +285,7 @@ async function addMember(actor, fields) {
     if (memberId === ROOT_ID) return { result: 'error', message: 'その会員IDは使えません。' };
   }
   if (!name || name.length > 100) return { result: 'error', message: '名前を入力してください（100文字まで）。' };
+  if (!introducer) return { result: 'error', message: '紹介者を入力してください。' };
   if (introducer.length > 100) return { result: 'error', message: '紹介者は100文字以内で入力してください。' };
   if (!validDate(regDate)) return { result: 'error', message: '登録日は YYYY-MM-DD 形式の正しい日付で入力してください。' };
   if (side !== 'L' && side !== 'R') return { result: 'error', message: '位置は左か右を選んでください。' };
@@ -343,15 +344,18 @@ async function updateMemberByHq(fields) {
     if (!validDate(submittedDate)) return { result: 'error', message: '登録日は YYYY-MM-DD 形式の正しい日付で入力してください。' };
     regDate = submittedDate;
   }
-  // 紹介者：フォームから送られてきた場合だけ更新する（空で送られたら未記入に戻す）。
-  // フィールド自体が無い送信では、今の値をそのまま残す。
+  // 紹介者：フォームから送られてきた場合は必須とする（空で送られたらエラーにし、
+  // 名前・登録日・紹介者のどれも保存しない）。フィールド自体が無い送信では、今の値を
+  // そのまま残す。
+  let newIntroducer;
   if (fields.introducer !== undefined) {
-    const introducer = String(fields.introducer || '').trim();
-    if (introducer.length > 100) return { result: 'error', message: '紹介者は100文字以内で入力してください。' };
-    member.introducer = introducer;
+    newIntroducer = String(fields.introducer || '').trim();
+    if (!newIntroducer) return { result: 'error', message: '紹介者を入力してください。' };
+    if (newIntroducer.length > 100) return { result: 'error', message: '紹介者は100文字以内で入力してください。' };
   }
   member.name = name;
   member.regDate = regDate;
+  if (newIntroducer !== undefined) member.introducer = newIntroducer;
   await saveStore();
   return { result: 'updated', message: '会員情報を修正しました。' };
 }
@@ -376,15 +380,18 @@ async function updateMemberByLeader(leader, fields) {
     if (!validDate(submittedDate)) return { result: 'error', message: '登録日は YYYY-MM-DD 形式の正しい日付で入力してください。' };
     regDate = submittedDate;
   }
-  // 紹介者：フォームから送られてきた場合だけ更新する（空で送られたら未記入に戻す）。
-  // フィールド自体が無い送信では、今の値をそのまま残す。
+  // 紹介者：フォームから送られてきた場合は必須とする（空で送られたらエラーにし、
+  // 名前・登録日・紹介者のどれも保存しない）。フィールド自体が無い送信では、今の値を
+  // そのまま残す。
+  let newIntroducer;
   if (fields.introducer !== undefined) {
-    const introducer = String(fields.introducer || '').trim();
-    if (introducer.length > 100) return { result: 'error', message: '紹介者は100文字以内で入力してください。' };
-    member.introducer = introducer;
+    newIntroducer = String(fields.introducer || '').trim();
+    if (!newIntroducer) return { result: 'error', message: '紹介者を入力してください。' };
+    if (newIntroducer.length > 100) return { result: 'error', message: '紹介者は100文字以内で入力してください。' };
   }
   member.name = name;
   member.regDate = regDate;
+  if (newIntroducer !== undefined) member.introducer = newIntroducer;
   await saveStore();
   return { result: 'updated', message: '会員情報を修正しました。' };
 }
@@ -639,7 +646,7 @@ function chartSlotForm(basePath, slot, today, levels, focusId) {
   return `<form class="chart-slot" method="post" action="${basePath}/add"><div class="slot-title">＋ ${sideLabel}に追加</div>`
     + `<input type="text" name="name" placeholder="名前" maxlength="100">`
     + `<input type="date" name="regDate" value="${today}">`
-    + `<input type="text" name="introducer" placeholder="紹介者（任意）" maxlength="100">`
+    + `<input type="text" name="introducer" placeholder="紹介者（必須）" maxlength="100" required>`
     + `<input type="hidden" name="parentId" value="${esc(slot.parentId)}">`
     + `<input type="hidden" name="side" value="${slot.side}">`
     + `<input type="hidden" name="levels" value="${levels}">`
@@ -779,7 +786,7 @@ function addMemberForm(action, scopeIds, preset) {
   return `<form method="post" action="${action}" id="add-form">
   <label>名前<input name="name" required maxlength="100"></label>
   <label>登録日<input name="regDate" required type="date"></label>
-  <label>紹介者（任意）<input name="introducer" maxlength="100"></label>
+  <label>紹介者（必須）<input name="introducer" required maxlength="100"></label>
   <label>上に付く人（親）<select name="parentId">${memberOptions(pre.parentId || '', scopeIds)}</select></label>
   <label>位置<select name="side"><option value="L" ${pre.side === 'L' ? 'selected' : ''}>左</option><option value="R" ${pre.side === 'R' ? 'selected' : ''}>右</option></select></label>
   <button type="submit">登録する</button></form>`;
@@ -926,7 +933,7 @@ async function handleHqTree(req, res, url) {
   <form method="post" action="${basePath}/edit">
   <label>名前<input name="name" value="${esc(editMember.name)}" required maxlength="100"></label>
   <label>登録日<input name="regDate" type="date" value="${esc(editMember.regDate || '')}"></label>
-  <label>紹介者（任意）<input name="introducer" value="${esc(editMember.introducer || '')}" maxlength="100"></label>
+  <label>紹介者（必須）<input name="introducer" value="${esc(editMember.introducer || '')}" required maxlength="100"></label>
   <input type="hidden" name="memberId" value="${esc(editMember.memberId)}">
   ${focusId ? `<input type="hidden" name="focus" value="${esc(focusId)}">` : ''}
   ${reqLevels != null ? `<input type="hidden" name="levels" value="${reqLevels}">` : ''}
@@ -955,7 +962,7 @@ async function handleHqTree(req, res, url) {
   }
   const body = `${hqNav()}
   <div class="card"><h2>組織図（ツリー表示・会社全体）</h2>
-  <p class="small">会社全体の組織図です。空いている場所の枠に名前を入力して「登録」を押すと、その場所にそのまま登録できます（登録日には今日の日付が入っています。変える場合は日付を変更してください）。紹介者が分かる場合は、任意で紹介者も入力できます。</p>
+  <p class="small">会社全体の組織図です。空いている場所の枠に名前を入力して「登録」を押すと、その場所にそのまま登録できます（登録日には今日の日付が入っています。変える場合は日付を変更してください）。紹介者は必須です。必ず入力してください。</p>
   <p class="small">各会員の箱の「名前を修正」から名前・登録日・紹介者を直せます。「削除」は、下に人がいる場合など、組織を壊すおそれがある場合はできません（理由は確認画面に表示されます）。</p>
   <p class="small">「表示する段数」の＋を押すと、まだ誰もいない先の段まで図を広げて見られます。先の段の「空き」を押すと、その枝の登録できる空き枠へ移動します。各会員の「この人から下を見る」を押すと、その人を先頭にした図へ移動できます。図の一番下の段にいる会員の「＋ 下を増やす」を押すと、その人を先頭にして、さらに下の枝を見たり入力したりできます（何度でも繰り返せます）。</p>
   ${focusBanner}
@@ -1300,7 +1307,7 @@ async function handleLeader(req, res, url, token) {
   <form method="post" action="${basePath}/edit">
   <label>名前<input name="name" value="${esc(editMember.name)}" required maxlength="100"></label>
   <label>登録日<input name="regDate" type="date" value="${esc(editMember.regDate || '')}"></label>
-  <label>紹介者（任意）<input name="introducer" value="${esc(editMember.introducer || '')}" maxlength="100"></label>
+  <label>紹介者（必須）<input name="introducer" value="${esc(editMember.introducer || '')}" required maxlength="100"></label>
   <input type="hidden" name="memberId" value="${esc(editMember.memberId)}">
   ${focusId ? `<input type="hidden" name="focus" value="${esc(focusId)}">` : ''}
   ${reqLevels != null ? `<input type="hidden" name="levels" value="${reqLevels}">` : ''}
@@ -1330,7 +1337,7 @@ async function handleLeader(req, res, url, token) {
   }
   const body = `${searchCard}<div class="card"><h2>${esc(leader.name)} さんの組織</h2>
   <p class="small">担当トップ：${esc(root ? root.name + '（' + root.memberId + '）' : leader.rootMemberId)} / ここから下だけが表示・入力できます。</p>
-  <p class="small">空いている場所の枠に名前を入力して「登録」を押すと、その場所にそのまま登録できます（登録日には今日の日付が入っています。変える場合は日付を変更してください）。紹介者が分かる場合は、任意で紹介者も入力できます。下のフォームから親と位置を選んで登録することもできます。</p>
+  <p class="small">空いている場所の枠に名前を入力して「登録」を押すと、その場所にそのまま登録できます（登録日には今日の日付が入っています。変える場合は日付を変更してください）。紹介者は必須です。必ず入力してください。下のフォームから親と位置を選んで登録することもできます。</p>
   <p class="small">「表示する段数」の＋を押すと、まだ誰もいない先の段まで図を広げて見られます。先の段の「空き」を押すと、その枝の登録できる空き枠へ移動します。</p>
   <p class="small">図の一番下の段にいる会員の「＋ 下を増やす」を押すと、その人を先頭にして、さらに下の枝を見たり入力したりできます（何度でも繰り返せます）。</p>
   ${focusBanner}
