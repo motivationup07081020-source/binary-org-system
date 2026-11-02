@@ -327,14 +327,23 @@ function pushConflict(kind, claimed, existingSnap, byName) {
 
 // ---------- 会員情報の修正（本部） ----------
 // 本部が組織図（ツリー）から会員の名前・登録日を直接修正する。権限は本部全体で、
-// 会社の枠だけは対象外にする。リーダーの修正と同様、これは訂正であり新規登録の
+// 会社の枠は名前だけ変更できる（削除はできない）。リーダーの修正と同様、これは訂正であり新規登録の
 // 申告ではないため、本部の要確認リスト（conflicts）は作らない。会員ID・親・位置・
 // 入力者は変更しない。
 async function updateMemberByHq(fields) {
   const memberId = String(fields.memberId || '').trim();
   const member = store.members[memberId];
-  if (!member || memberId === ROOT_ID || member.root) {
+  if (!member) {
     return { result: 'error', message: '修正できる会員が見つかりません。' };
+  }
+  // 会社（一番上）の枠は、名前だけ変更できる（本部のみ）。登録日・紹介者・位置の
+  // 概念が無い枠なので、それ以外の項目は受け付けず、削除も従来どおりできない。
+  if (memberId === ROOT_ID || member.root) {
+    const rootName = String(fields.name || '').trim();
+    if (!rootName || rootName.length > 100) return { result: 'error', message: '名前を入力してください（100文字まで）。' };
+    member.name = rootName;
+    await saveStore();
+    return { result: 'updated', message: '一番上の名前を変更しました。' };
   }
   const name = String(fields.name || '').trim();
   if (!name || name.length > 100) return { result: 'error', message: '名前を入力してください（100文字まで）。' };
@@ -625,7 +634,12 @@ function collectChartItems(rootId, maxDepth = CHART_MAX_DEPTH) {
   return { byDepth, omitted, cutoff };
 }
 function chartNodeHtml(m, editHref, focusHref, deleteHref) {
-  if (m.root) return `<div class="chart-node chart-root">${esc(m.name)}</div>`;
+  if (m.root) {
+    // 会社（一番上）の枠は、本部の編集モードでのみ「名前を修正」を出す（削除リンクは
+    // 出さない）。リーダー画面には会社の枠自体が描かれないため、リーダー側に影響はない。
+    const rootEdit = editHref ? `<br><a class="chart-edit" href="${editHref}">名前を修正</a>` : '';
+    return `<div class="chart-node chart-root">${esc(m.name)}${rootEdit}</div>`;
+  }
   const c = countsFor(m.memberId);
   const editLink = editHref ? `<br><a class="chart-edit" href="${editHref}">名前を修正</a>` : '';
   const deleteLink = deleteHref ? `<a class="chart-delete" href="${deleteHref}">削除</a>` : '';
@@ -734,7 +748,7 @@ function renderChartGrid(rootId, basePath, reqLevels, focusCtx, opts) {
           // 共通ガードで判定する。本部の編集モードでは leaderRootId が無いため、
           // 会社以外の会員が対象になる）。
           let deleteHref = '';
-          if (!viewOnly && it.m.memberId !== leaderRootId) {
+          if (!viewOnly && it.m.memberId !== leaderRootId && !it.m.root) {
             deleteHref = `${basePath}?delete=${encodeURIComponent(it.m.memberId)}`;
             if (focusId) deleteHref += `&focus=${encodeURIComponent(focusId)}`;
             if (reqLevels != null) deleteHref += `&levels=${reqLevels}`;
@@ -846,7 +860,7 @@ async function handleHq(req, res, url) {
 }
 // 本部の組織図（ツリー表示）。リーダー画面と同じ段グリッドの組織図を、会社を先頭に
 // 全体表示し、本部が図の中でそのまま追加・修正・削除できるページ。空き枠は入力
-// フォームにし、会員の箱には修正・削除リンクを付ける（会社の枠は編集対象外）。
+// フォームにし、会員の箱には修正・削除リンクを付ける（会社の枠は名前だけ変更可・削除不可）。
 // 深い組織のために、リーダー画面と同じ枝フォーカス（?focus=）が使える。
 async function handleHqTree(req, res, url) {
   if (!isHq(req)) return redirect(res, '/login');
@@ -922,12 +936,21 @@ async function handleHqTree(req, res, url) {
   if (focusId) viewParams.push(`focus=${encodeURIComponent(focusId)}`);
   if (reqLevels != null) viewParams.push(`levels=${reqLevels}`);
   const currentViewHref = viewParams.length ? `${basePath}?${viewParams.join('&')}` : basePath;
-  // 会員情報の修正（?edit=<会員ID>）。実在する会社以外の会員だけを対象にする。
+  // 会員情報の修正（?edit=<会員ID>）。実在する会員を対象にし、会社の枠は名前だけの
+  // 変更カードを出す。
   const editParam = (url.searchParams.get('edit') || '').trim();
-  const editMember = editParam && editParam !== ROOT_ID && store.members[editParam] && !store.members[editParam].root
-    ? store.members[editParam] : null;
+  const editMember = editParam && store.members[editParam] ? store.members[editParam] : null;
   let editCard = '';
-  if (editMember) {
+  if (editMember && editMember.root) {
+    editCard = `<div class="card" id="edit-form"><h3>一番上の名前を変更する</h3>
+  <p class="small">組織図の一番上に出る名前です。変更できるのは名前だけで、この枠そのものは削除できません。</p>
+  <form method="post" action="${basePath}/edit">
+  <label>名前<input name="name" value="${esc(editMember.name)}" required maxlength="100"></label>
+  <input type="hidden" name="memberId" value="${esc(editMember.memberId)}">
+  ${focusId ? `<input type="hidden" name="focus" value="${esc(focusId)}">` : ''}
+  ${reqLevels != null ? `<input type="hidden" name="levels" value="${reqLevels}">` : ''}
+  <button type="submit">変更を保存</button> <a class="btn sub" href="${currentViewHref}">キャンセル</a></form></div>`;
+  } else if (editMember) {
     editCard = `<div class="card" id="edit-form"><h3>会員情報を修正する</h3>
   <p class="small">対象：${esc(editMember.name)}（${esc(editMember.memberId)}）</p>
   <form method="post" action="${basePath}/edit">
@@ -963,7 +986,7 @@ async function handleHqTree(req, res, url) {
   const body = `${hqNav()}
   <div class="card"><h2>組織図（ツリー表示・会社全体）</h2>
   <p class="small">会社全体の組織図です。空いている場所の枠に名前を入力して「登録」を押すと、その場所にそのまま登録できます（登録日には今日の日付が入っています。変える場合は日付を変更してください）。紹介者は必須です。必ず入力してください。</p>
-  <p class="small">各会員の箱の「名前を修正」から名前・登録日・紹介者を直せます。「削除」は、下に人がいる場合など、組織を壊すおそれがある場合はできません（理由は確認画面に表示されます）。</p>
+  <p class="small">各会員の箱の「名前を修正」から名前・登録日・紹介者を直せます。一番上の枠も「名前を修正」から名前だけ変更できます。「削除」は、下に人がいる場合など、組織を壊すおそれがある場合はできません（理由は確認画面に表示されます）。</p>
   <p class="small">「表示する段数」の＋を押すと、まだ誰もいない先の段まで図を広げて見られます。先の段の「空き」を押すと、その枝の登録できる空き枠へ移動します。各会員の「この人から下を見る」を押すと、その人を先頭にした図へ移動できます。図の一番下の段にいる会員の「＋ 下を増やす」を押すと、その人を先頭にして、さらに下の枝を見たり入力したりできます（何度でも繰り返せます）。</p>
   ${focusBanner}
   <div class="chart-bar"><span class="zlabel">表示する段数：</span><span class="zoombox"><a class="zbtn" href="${lvHref(lvMinus)}" aria-label="段数を減らす">−</a><span class="pct">${chart.levels}段</span><a class="zbtn" href="${lvHref(lvPlus)}" aria-label="段数を増やす">＋</a></span><span class="zlabel">図の大きさ：</span><span class="zoombox"><button type="button" id="zOut" aria-label="縮小">−</button><span class="pct" id="zPct">100%</span><button type="button" id="zIn" aria-label="拡大">＋</button><button type="button" id="zFit">等倍</button></span><span class="zlabel">横にスクロールできます</span></div>
