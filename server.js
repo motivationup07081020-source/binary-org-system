@@ -555,6 +555,8 @@ a.chart-empty:hover{border-color:#94a3b8;color:#64748b;background:#f1f5f9}
 .chart-drill:hover{background:#dcfce7}
 .chart-edit{display:inline-block;margin-top:4px;color:#14532d;font-size:12px;font-weight:600}
 .chart-edit:hover{color:#166534;text-decoration-thickness:2px}
+.chart-root .chart-edit{color:#dcfce7}
+.chart-root .chart-edit:hover{color:#ffffff}
 .chart-delete{display:inline-block;margin-top:4px;margin-left:10px;color:#b91c1c;font-size:12px;font-weight:600}
 .chart-delete:hover{color:#991b1b;text-decoration-thickness:2px}
 .chart-focus-link{display:inline-block;margin-top:4px;color:#1d4ed8;font-size:12px;font-weight:600}
