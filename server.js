@@ -12,6 +12,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const zlib = require('zlib');
 const { URL } = require('url');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -810,7 +811,7 @@ function addMemberForm(action, scopeIds, preset) {
 
 // ---------- 本部 ----------
 function hqNav() {
-  return `<p class="nav"><a href="/hq">組織図（全体）</a><a href="/hq/tree">組織図（ツリー）</a><a href="/hq/members">会員一覧</a><a href="/hq/leaders">リーダー管理</a><a href="/hq/conflicts">要確認リスト</a><a href="/hq/export.csv">CSV書き出し</a></p>
+  return `<p class="nav"><a href="/hq">組織図（全体）</a><a href="/hq/tree">組織図（ツリー）</a><a href="/hq/members">会員一覧</a><a href="/hq/leaders">リーダー管理</a><a href="/hq/conflicts">要確認リスト</a><a href="/hq/export.csv">CSV書き出し</a><a href="/hq/export.xlsx">Excel書き出し</a></p>
   <form method="post" action="/logout" style="display:inline"><button class="sub" type="submit">ログアウト</button></form>`;
 }
 async function handleSetup(req, res, url) {
@@ -1141,18 +1142,102 @@ async function handleHqConflicts(req, res, url) {
   <table><tr><th>会員ID</th><th>現在の登録</th><th>届いた申告</th><th>申告者</th><th>操作</th></tr>${rows || '<tr><td colspan="5">要確認はありません</td></tr>'}</table></div>`;
   return send(res, 200, page('本部：要確認リスト', body, flashFrom(url)));
 }
+function memberExportData() {
+  // 会員IDの数字順に並べる（文字列順だと 1, 10, 100... になって読みにくいため）
+  const list = Object.values(store.members).filter(m => !m.root).sort((a, b) => {
+    const na = /^\d+$/.test(a.memberId) ? BigInt(a.memberId) : null;
+    const nb = /^\d+$/.test(b.memberId) ? BigInt(b.memberId) : null;
+    if (na !== null && nb !== null) return na < nb ? -1 : na > nb ? 1 : 0;
+    if (na !== null) return -1;
+    if (nb !== null) return 1;
+    return String(a.memberId).localeCompare(String(b.memberId));
+  });
+  const header = ['会員ID', '名前', '紹介者', '登録日', '親の会員ID', '位置', '左人数', '右人数', '配下合計'];
+  const rows = list.map(m => {
+    const c = countsFor(m.memberId);
+    return [m.memberId, m.name, m.introducer || '', m.regDate || '', m.parentId || '', m.side === 'L' ? '左' : m.side === 'R' ? '右' : '', c.left, c.right, c.total];
+  });
+  return { header, rows };
+}
 function handleExportCsv(req, res) {
   if (!isHq(req)) return redirect(res, '/login');
-  const list = Object.values(store.members).filter(m => !m.root).sort((a, b) => a.memberId.localeCompare(b.memberId));
+  const { header, rows } = memberExportData();
   const quote = v => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
-  const lines = [['会員ID', '名前', '紹介者', '登録日', '親の会員ID', '位置', '左人数', '右人数', '配下合計'].join(',')];
-  for (const m of list) {
-    const c = countsFor(m.memberId);
-    lines.push([m.memberId, m.name, m.introducer || '', m.regDate || '', m.parentId || '', m.side === 'L' ? '左' : m.side === 'R' ? '右' : '', c.left, c.right, c.total].map(quote).join(','));
-  }
+  const lines = [header.join(',')];
+  for (const row of rows) lines.push(row.map(quote).join(','));
   const csv = '﻿' + lines.join('\r\n') + '\r\n';
   res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="members.csv"' });
   res.end(csv);
+}
+// ---- Excel (.xlsx) 生成（外部ライブラリなし。ZIP+XMLを自前で組む） ----
+const CRC_TABLE = (() => { const t = new Int32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c; } return t; })();
+function crc32(buf) { let c = 0xFFFFFFFF; for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+function zipDeflate(files) {
+  const chunks = []; const central = []; let offset = 0;
+  for (const f of files) {
+    const nameBuf = Buffer.from(f.name, 'utf8');
+    const comp = zlib.deflateRawSync(f.data, { level: 6 });
+    const crc = crc32(f.data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(0x0800, 6); local.writeUInt16LE(8, 8);
+    local.writeUInt32LE(crc, 14); local.writeUInt32LE(comp.length, 18); local.writeUInt32LE(f.data.length, 22); local.writeUInt16LE(nameBuf.length, 26);
+    chunks.push(local, nameBuf, comp);
+    const cen = Buffer.alloc(46);
+    cen.writeUInt32LE(0x02014b50, 0); cen.writeUInt16LE(20, 4); cen.writeUInt16LE(20, 6); cen.writeUInt16LE(0x0800, 8); cen.writeUInt16LE(8, 10);
+    cen.writeUInt32LE(crc, 16); cen.writeUInt32LE(comp.length, 20); cen.writeUInt32LE(f.data.length, 24); cen.writeUInt16LE(nameBuf.length, 28); cen.writeUInt32LE(offset, 42);
+    central.push(cen, nameBuf);
+    offset += 30 + nameBuf.length + comp.length;
+  }
+  const cenSize = central.reduce((sum, b) => sum + b.length, 0);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(files.length, 8); end.writeUInt16LE(files.length, 10);
+  end.writeUInt32LE(cenSize, 12); end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...chunks, ...central, end]);
+}
+function xlsxEscape(v) {
+  return String(v == null ? '' : v).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function xlsxColName(i) { let s = ''; let n = i + 1; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; }
+function buildXlsx(header, rows) {
+  const widths = [10, 32, 32, 13, 12, 8, 10, 10, 10];
+  const cellXml = (v, ref, bold) => {
+    const style = bold ? ' s="1"' : '';
+    if (typeof v === 'number' && Number.isFinite(v)) return `<c r="${ref}"${style}><v>${v}</v></c>`;
+    if (/^\d+$/.test(String(v)) && String(v).length <= 15) return `<c r="${ref}"${style}><v>${String(v)}</v></c>`;
+    return `<c r="${ref}"${style} t="inlineStr"><is><t xml:space="preserve">${xlsxEscape(v)}</t></is></c>`;
+  };
+  const rowXml = (vals, rIdx, bold) => `<row r="${rIdx}">` + vals.map((v, cIdx) => cellXml(v, xlsxColName(cIdx) + rIdx, bold)).join('') + '</row>';
+  const sheetRows = [rowXml(header, 1, true)];
+  rows.forEach((row, i) => sheetRows.push(rowXml(row, i + 2, false)));
+  const lastRef = xlsxColName(header.length - 1) + (rows.length + 1);
+  const sheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews><sheetFormatPr defaultRowHeight="15"/><cols>${widths.map((w, i) => `<col min="${i + 1}" max="${i + 1}" width="${w}" customWidth="1"/>`).join('')}</cols><sheetData>${sheetRows.join('')}</sheetData><autoFilter ref="A1:${lastRef}"/></worksheet>`;
+  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`;
+  const rels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`;
+  const workbook = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="会員一覧" sheetId="1" r:id="rId1"/></sheets></workbook>`;
+  const workbookRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`;
+  const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles><cellXfs count="2"><xf fontId="0" fillId="0" borderId="0" xfId="0"/><xf fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs></styleSheet>`;
+  return zipDeflate([
+    { name: '[Content_Types].xml', data: Buffer.from(contentTypes, 'utf8') },
+    { name: '_rels/.rels', data: Buffer.from(rels, 'utf8') },
+    { name: 'xl/workbook.xml', data: Buffer.from(workbook, 'utf8') },
+    { name: 'xl/_rels/workbook.xml.rels', data: Buffer.from(workbookRels, 'utf8') },
+    { name: 'xl/styles.xml', data: Buffer.from(styles, 'utf8') },
+    { name: 'xl/worksheets/sheet1.xml', data: Buffer.from(sheet, 'utf8') }
+  ]);
+}
+function handleExportXlsx(req, res) {
+  if (!isHq(req)) return redirect(res, '/login');
+  const { header, rows } = memberExportData();
+  const buf = buildXlsx(header, rows);
+  res.writeHead(200, { 'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'Content-Disposition': 'attachment; filename="members.xlsx"', 'Content-Length': buf.length });
+  res.end(buf);
 }
 
 // ---------- リーダー ----------
@@ -1400,6 +1485,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/hq/leaders') return handleHqLeaders(req, res, url);
     if (p === '/hq/conflicts') return handleHqConflicts(req, res, url);
     if (p === '/hq/export.csv') return handleExportCsv(req, res);
+    if (p === '/hq/export.xlsx') return handleExportXlsx(req, res);
     const lm = p.match(/^\/leader\/([A-Za-z0-9_-]+)(\/(consent|add|edit|delete))?$/);
     if (lm) return handleLeader(req, res, url, lm[1]);
     return send(res, 404, page('見つかりません', '<div class="card"><h2>ページが見つかりません</h2></div>'));
