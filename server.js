@@ -785,9 +785,12 @@ function renderChartGrid(rootId, basePath, reqLevels, focusCtx, opts) {
           const drill = cutoff.has(it.m.memberId)
             ? `<a class="chart-drill" href="${basePath}?focus=${encodeURIComponent(it.m.memberId)}${reqLevels != null ? '&levels=' + reqLevels : ''}#chartWrap">＋ 下を増やす</a>`
             : '';
-          // 本部モード（見る専用・編集のどちらでも）では、会社以外の全会員の箱から、
-          // その会員を先頭にした図へ直接移動できるリンクを付ける（リーダー画面には付けない）。
-          const focusHref = (viewOnly || hqEditable) && !it.m.root
+          // 会社以外の全会員の箱から、その会員を先頭にした図へ直接移動できる
+          // 「この人から下を見る」リンクを付ける（本部・リーダー共通。2026-11-08に
+          // 本人の希望でリーダー画面にも付けるよう変更）。リーダー画面に描かれるのは
+          // 担当範囲内の会員だけなので範囲外へのリンクは出ず、サーバー側でも
+          // フォーカス先が担当範囲内かを確認している。
+          const focusHref = !it.m.root
             ? `${basePath}?focus=${encodeURIComponent(it.m.memberId)}#chartWrap`
             : '';
           // 会員の箱にも、その会員が入っている枠のアンカーID（slot-<親>-<左右>）を付ける。
