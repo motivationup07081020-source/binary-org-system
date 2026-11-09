@@ -1020,7 +1020,43 @@ async function handleHqTree(req, res, url) {
   <p class="small">対象：${esc(deleteTarget.name)}（${esc(deleteTarget.memberId)}） / 登録：${esc(deleteTarget.regDate || '-')} / 親：${esc(parent ? parent.name + '（' + parent.memberId + '）' : '')} の${deleteTarget.side === 'L' ? '左' : deleteTarget.side === 'R' ? '右' : ''}</p>
   ${actionHtml}</div>`;
   }
+  // 会員検索（?q=）。リーダー画面と同じく、全体から名前・会員IDの部分一致で探し、
+  // 結果を押すとその会員を先頭にした図（フォーカス表示）へ移動する。
+  const searchQuery = (url.searchParams.get('q') || '').trim();
+  let searchResultsHtml = '';
+  if (searchQuery) {
+    const needle = searchQuery.toLowerCase();
+    const depthMap = scopeDepthMap(ROOT_ID);
+    const matches = [];
+    for (const id of depthMap.keys()) {
+      const m = store.members[id];
+      if (!m) continue;
+      if (m.name.toLowerCase().includes(needle) || m.memberId.toLowerCase().includes(needle)) matches.push(m);
+    }
+    if (!matches.length) {
+      searchResultsHtml = '<p>見つかりませんでした</p>';
+    } else {
+      const shown = matches.slice(0, 50);
+      const items = shown.map(m => {
+        const depth = (depthMap.get(m.memberId) || 0) + 1;
+        const parent = m.root
+          ? 'トップ'
+          : (m.parentId && store.members[m.parentId] ? store.members[m.parentId].name : '');
+        const href = m.root
+          ? basePath
+          : `${basePath}?focus=${encodeURIComponent(m.memberId)}#chartWrap`;
+        return `<a class="search-result" href="${href}"><strong>${esc(m.name)}</strong> <span class="small">ID:${esc(m.memberId)} / 登録:${esc(m.regDate || '-')} / ${depth}段目 / 親：${esc(parent)}</span></a>`;
+      }).join('');
+      const note = matches.length > shown.length
+        ? `<p class="small">${matches.length}件中、最初の${shown.length}件まで表示しています。</p>`
+        : `<p class="small">${matches.length}件見つかりました。</p>`;
+      searchResultsHtml = `${note}${items}`;
+    }
+  }
+  const searchCard = `<div class="card"><h3>会員を検索</h3>
+  <form class="search-form" method="get" action="${basePath}"><input name="q" value="${esc(searchQuery)}" placeholder="名前・会員IDで検索"><button type="submit">検索</button></form>${searchResultsHtml}</div>`;
   const body = `${hqNav()}
+  ${searchCard}
   <div class="card breakout chart-card"><h2>組織図（ツリー表示・会社全体）</h2>
   <p class="small">会社全体の組織図です。空いている場所の枠に名前を入力して「登録」を押すと、その場所にそのまま登録できます（登録日には今日の日付が入っています。変える場合は日付を変更してください）。紹介者は必須です。必ず入力してください。</p>
   <p class="small">各会員の箱の「名前を修正」から名前・登録日・紹介者を直せます。一番上の枠も「名前を修正」から名前だけ変更できます。「削除」は、下に人がいる場合など、組織を壊すおそれがある場合はできません（理由は確認画面に表示されます）。</p>
@@ -1104,6 +1140,13 @@ async function handleHqLeaders(req, res, url) {
       leader.token = newToken(); leader.status = 'active'; await saveStore(); return redirect(res, back('/hq/leaders', 'msg', '専用リンクを再発行しました（前のリンクは使えません）。'));
     }
     if (action === 'revoke') { leader.status = 'revoked'; await saveStore(); return redirect(res, back('/hq/leaders', 'msg', '専用リンクを無効化しました。')); }
+    if (action === 'delete') {
+      // リーダー自体の削除（間違えて作ったリーダーの後片付け用）。確認画面を経た
+      // POSTでのみ実行する。消すと専用リンクは即座に使えなくなり、一覧からも消える。
+      store.leaders = store.leaders.filter(l => l.id !== leader.id);
+      await saveStore();
+      return redirect(res, back('/hq/leaders', 'msg', `リーダー「${leader.name}」を削除しました（専用リンクは使えなくなりました）。`));
+    }
     return redirect(res, '/hq/leaders');
   }
   const base = `${req.headers['x-forwarded-proto'] ? String(req.headers['x-forwarded-proto']).split(',')[0] : 'http'}://${req.headers.host}`;
@@ -1113,15 +1156,51 @@ async function handleHqLeaders(req, res, url) {
     return `<tr><td>${esc(l.name)}</td><td>${esc(root ? root.name + '（' + root.memberId + '）' : l.rootMemberId)}</td>
     <td style="word-break:break-all">${esc(link)}</td><td>${l.status === 'active' ? '有効' : '無効'} / ${l.consentAt ? '同意済み' : '未同意'}</td>
     <td><form method="post" action="/hq/leaders" style="display:inline"><input type="hidden" name="leaderId" value="${esc(l.id)}"><input type="hidden" name="action" value="reissue"><button class="sub" type="submit">再発行</button></form>
-    <form method="post" action="/hq/leaders" style="display:inline"><input type="hidden" name="leaderId" value="${esc(l.id)}"><input type="hidden" name="action" value="revoke"><button class="danger" type="submit">無効化</button></form></td></tr>`;
+    <form method="post" action="/hq/leaders" style="display:inline"><input type="hidden" name="leaderId" value="${esc(l.id)}"><input type="hidden" name="action" value="revoke"><button class="danger" type="submit">無効化</button></form>
+    <a href="/hq/leaders?delete=${esc(l.id)}#leader-delete">削除</a></td></tr>`;
   }).join('');
-  const body = `${hqNav()}<div class="card"><h2>リーダー管理</h2>
+  // リーダーの削除確認（?delete=<リーダーID>）。対象があるときだけ確認カードを出す。
+  // 実際の削除は POST（action=delete）でのみ行う。
+  const delParam = (url.searchParams.get('delete') || '').trim();
+  const delLeader = delParam ? store.leaders.find(l => l.id === delParam) : null;
+  let leaderDeleteCard = '';
+  if (delLeader) {
+    const root = store.members[delLeader.rootMemberId];
+    leaderDeleteCard = `<div class="card" id="leader-delete"><h3>リーダーを削除する</h3>
+  <p class="small">対象：${esc(delLeader.name)}（担当トップ：${esc(root ? root.name + '（' + root.memberId + '）' : delLeader.rootMemberId)}）</p>
+  <p class="small">削除すると、このリーダーの専用リンクはすぐに使えなくなり、一覧からも消えます。元に戻せません。間違えて作ったリーダーだけを削除してください。</p>
+  <form method="post" action="/hq/leaders"><input type="hidden" name="leaderId" value="${esc(delLeader.id)}"><input type="hidden" name="action" value="delete"><button class="danger" type="submit">削除する</button> <a class="btn sub" href="/hq/leaders">キャンセル</a></form></div>
+  `;
+  }
+  // 担当トップの検索（?mq=）。会員が増えるとプルダウンから探すのが大変なため、
+  // 名前・会員IDの部分一致で候補を絞ってから選べるようにする。検索しない場合は
+  // 従来どおり全会員をプルダウンに出す。候補は最大50件（会社の枠は対象外）。
+  const mq = (url.searchParams.get('mq') || '').trim();
+  let rootOptions = memberOptions('', null);
+  let rootSearchNote = '';
+  if (mq) {
+    const needle = mq.toLowerCase();
+    const matches = Object.values(store.members)
+      .filter(m => !m.root && (m.name.toLowerCase().includes(needle) || m.memberId.toLowerCase().includes(needle)))
+      .sort((a, b) => a.memberId.localeCompare(b.memberId));
+    const shown = matches.slice(0, 50);
+    rootOptions = shown.map(m => `<option value="${esc(m.memberId)}">${esc(m.name)}（${esc(m.memberId)}）</option>`).join('');
+    rootSearchNote = matches.length
+      ? `<p class="small">「${esc(mq)}」の検索結果：${matches.length}件${matches.length > shown.length ? `（最初の${shown.length}件を表示しています）` : ''}。下の「担当トップ」から選んでください。</p>`
+      : `<p class="small">「${esc(mq)}」に当たる会員は見つかりませんでした。名前や会員IDを変えて検索してください。</p>`;
+  }
+  const body = `${hqNav()}${leaderDeleteCard}<div class="card"><h2>リーダー管理</h2>
   <p class="small">専用リンクをリーダーに渡してください。リンクを開くとパスワードなしで、そのリーダーの配下だけが見える画面に入ります。再発行すると前のリンクは使えなくなります。</p>
   <table><tr><th>リーダー名</th><th>担当トップ（ルート会員）</th><th>専用リンク</th><th>状態</th><th>操作</th></tr>${rows || '<tr><td colspan="5">まだいません</td></tr>'}</table></div>
-  <div class="card"><h3>リーダーを作る</h3><form method="post" action="/hq/leaders">
+  <div class="card"><h3>リーダーを作る</h3>
+  <form method="get" action="/hq/leaders" class="search-form">
+  <label>担当トップを検索（名前・会員IDの一部で探せます）<input name="mq" value="${esc(mq)}" placeholder="例：山田 / 161"></label>
+  <button class="sub" type="submit">検索</button></form>
+  ${rootSearchNote}
+  <form method="post" action="/hq/leaders">
   <input type="hidden" name="action" value="create">
   <label>リーダー名<input name="name" required></label>
-  <label>担当トップ（この会員から下が、そのリーダーの担当範囲です）<select name="rootMemberId">${memberOptions('', null)}</select></label>
+  <label>担当トップ（この会員から下が、そのリーダーの担当範囲です）<select name="rootMemberId">${rootOptions}</select></label>
   <button type="submit">作成してリンクを発行</button></form>
   <p class="small">※ 担当トップの会員がまだいない場合は、先に「会員一覧」から本部がその会員を登録してください。</p></div>`;
   return send(res, 200, page('本部：リーダー管理', body, flashFrom(url)));
